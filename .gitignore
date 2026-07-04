@@ -1,0 +1,8 @@
+/build*/
+/.deps/
+/.cache/
+/dist/
+.DS_Store
+*.dSYM/
+*.bin
+*.wav
