@@ -1,4 +1,6 @@
 #include "wscore/audio.hpp"
+#include "wscore/resample.hpp"
+#include "wscore/engine.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <thread>
@@ -23,5 +25,16 @@ int main() {
     CHECK(store.buffered() == 2);
     ws::Stereo silence{std::vector<float>(500), std::vector<float>(500)};
     ws::trim(silence); CHECK(silence[0].empty());
-    std::cout << "capture and queue ok\n";
+    ws::Stereo sine{std::vector<float>(4800), std::vector<float>(4800)};
+    for (int i = 0; i < 4800; ++i) sine[0][i] = sine[1][i] = .5f * std::sin(i * 440 * 6.283185307 / 48000);
+    auto clip = std::make_shared<ws::Clip>(); clip->audio = ws::resample(sine, 48000);
+    CHECK(clip->audio[0].size() == 4410);
+    ws::Engine engine;
+    engine.publish(std::make_unique<ws::Playback>(ws::Playback{clip}));
+    engine.setLoop(0, clip->seconds()); engine.playing = true;
+    float left[256], right[256];
+    double energy = 0;
+    for (int k = 0; k < 150; ++k) { engine.render(left, right, 256); for (auto x : left) { CHECK(std::isfinite(x)); CHECK(std::abs(x) <= .981); energy += x * x; } }
+    CHECK(energy > 100); CHECK(engine.loops.load() > 5);
+    std::cout << "capture, resample and playback ok\n";
 }
