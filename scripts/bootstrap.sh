@@ -16,3 +16,7 @@ fetch() {
 fetch stretch https://github.com/Signalsmith-Audio/signalsmith-stretch.git 57b93f4e9206a089a45387eaa39bdc9f310d3308
 fetch linear https://github.com/Signalsmith-Audio/linear.git 0.3.1
 fetch r8brain https://github.com/avaneev/r8brain-free-src.git e71c31bf320f84210bb4bdcb57e296c39ce940f9
+fetch demucs https://github.com/sevagh/demucs.cpp.git f1206e9adeea103aef4a636b9e62297cf1f8e34e
+if [ ! -f .deps/demucs/vendor/eigen/Eigen/Core ]; then
+  git -C .deps/demucs submodule update --init --depth 1 vendor/eigen
+fi

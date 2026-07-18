@@ -20,7 +20,7 @@ struct Clip {
     std::vector<float> peaks;
     std::vector<double> beats;
     double bpm = 0;
-    int key = -1;
+    int key = -1, downbeat = 0;
     double seconds() const { return double(audio[0].size()) / rate; }
 };
 

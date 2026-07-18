@@ -1,4 +1,8 @@
 #include "wscore/wav.hpp"
+#include "wscore/separation.hpp"
+#include "wscore/resample.hpp"
+#include <chrono>
+#include <sys/resource.h>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -10,6 +14,7 @@ void help() {
                  "Usage:\n"
                  "  wsbench --version\n"
                  "  wsbench inspect file.wav\n"
+                 "  wsbench separate model.bin 4|6 file.wav\n"
                  "  wsbench sdr reference.wav estimate.wav\n";
 }
 
@@ -60,6 +65,27 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
             help();
+            return 0;
+        }
+        if (argc == 5 && std::string(argv[1]) == "separate") {
+            auto wav = ws::readWav(argv[4]);
+            auto audio = ws::resample(wav.audio, wav.sampleRate);
+            if (audio[0].empty()) throw std::runtime_error("empty audio");
+            ws::Separator separator;
+            separator.load(argv[2], std::stoi(argv[3]));
+            auto start = std::chrono::steady_clock::now();
+            auto result = separator.separate(audio);
+            double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            rusage usage{}; getrusage(RUSAGE_SELF, &usage);
+            double error = 0, power = 0;
+            for (size_t i = 0; i < audio[0].size(); ++i) for (int c = 0; c < 2; ++c) {
+                double sum = 0; for (auto& stem : result) sum += stem[c][i];
+                error += std::pow(sum - audio[c][i], 2); power += std::pow(audio[c][i], 2);
+            }
+            std::cout << "backend: demucs.cpp+Accelerate\nseconds: " << seconds
+                      << "\nrtf: " << seconds / (double(audio[0].size()) / ws::rate)
+                      << "\npeak_rss_bytes: " << usage.ru_maxrss
+                      << "\nreconstruction_sdr_db: " << 10 * std::log10((power + 1e-30) / (error + 1e-30)) << '\n';
             return 0;
         }
         if (argc == 3 && std::string(argv[1]) == "inspect") return inspect(argv[2]);
