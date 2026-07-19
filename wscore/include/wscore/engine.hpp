@@ -1,8 +1,9 @@
 #pragma once
 #include "audio.hpp"
+#include "separation.hpp"
 #include "signalsmith-stretch.h"
 namespace ws {
-struct Playback { std::shared_ptr<const Clip> clip; };
+struct Playback { std::shared_ptr<const Clip> clip; std::shared_ptr<StemBank> stems; };
 class Engine {
     std::atomic<Playback*> published{nullptr}, hazard{nullptr};
     std::vector<std::unique_ptr<Playback>> owned;
@@ -12,13 +13,15 @@ class Engine {
     double remainder = 0;
     uint32_t position = 0;
     float limitGain = 1;
+    std::array<float, stemCount> smooth{1, 1, 1, 1, 1, 1};
 public:
+    std::array<std::atomic<float>, stemCount> gains;
     std::atomic<bool> playing{false};
     std::atomic<float> speed{1}, pitch{0};
     std::atomic<uint64_t> loop{0};
     std::atomic<double> playhead{0};
     std::atomic<uint64_t> loops{0};
-    Engine() { stretch.presetDefault(2, rate); }
+    Engine() { stretch.presetDefault(2, rate); for (auto& gain : gains) gain.store(1); }
     void publish(std::unique_ptr<Playback> next) {
         auto* p = next.get(); owned.push_back(std::move(next));
         published.store(p, std::memory_order_seq_cst); collect();
@@ -53,10 +56,29 @@ public:
             unsigned n = std::min(256u, count - offset);
             remainder += n * double(ratio);
             unsigned needed = unsigned(remainder); remainder -= needed;
+            auto sample = [&](unsigned frame, int channel) {
+                if (data->stems) {
+                    auto* block = data->stems->blocks[frame / segmentFrames].load(std::memory_order_acquire);
+                    if (block) {
+                        float sum = 0;
+                        for (unsigned s = 0; s < stemCount; ++s) sum += block->audio[s][channel][frame % segmentFrames] * smooth[s];
+                        return sum;
+                    }
+                }
+                return data->clip->audio[channel][frame];
+            };
+            unsigned fade = std::min(441u, (b - a) / 4);
             for (unsigned i = 0; i < needed; ++i) {
-                input[0][i] = data->clip->audio[0][position];
-                input[1][i] = data->clip->audio[1][position];
-                if (++position >= b) { position = a; loops.fetch_add(1, std::memory_order_relaxed); }
+                for (unsigned s = 0; s < stemCount; ++s) smooth[s] += .002f * (gains[s].load(std::memory_order_relaxed) - smooth[s]);
+                for (int c = 0; c < 2; ++c) {
+                    float value = sample(position, c);
+                    if (fade && position >= b - fade) {
+                        float t = float(position - (b - fade)) / fade;
+                        value = value * std::cos(t * 1.570796327f) + sample(a + position - (b - fade), c) * std::sin(t * 1.570796327f);
+                    }
+                    input[c][i] = value;
+                }
+                if (++position >= b) { position = a + fade; loops.fetch_add(1, std::memory_order_relaxed); }
             }
             float* ins[]{input[0].data(), input[1].data()};
             float* outs[]{left + offset, right + offset};
