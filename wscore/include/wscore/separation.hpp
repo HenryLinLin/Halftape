@@ -14,6 +14,7 @@ public:
     void load(const std::string& path, int stems);
     void unload();
     bool loaded() const;
+    const char* backend() const;
     Stems separate(const Stereo& audio, const std::function<void(float)>& progress = {});
 };
 constexpr unsigned segmentFrames = 6 * rate;

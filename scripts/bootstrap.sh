@@ -20,3 +20,16 @@ fetch demucs https://github.com/sevagh/demucs.cpp.git f1206e9adeea103aef4a636b9e
 if [ ! -f .deps/demucs/vendor/eigen/Eigen/Core ]; then
   git -C .deps/demucs submodule update --init --depth 1 vendor/eigen
 fi
+ort_dir=.deps/onnxruntime-osx-arm64-1.28.0
+if [ ! -f "$ort_dir/lib/libonnxruntime.dylib" ]; then
+  archive=$(mktemp -t halftape-ort)
+  trap 'rm -f "$archive"' EXIT
+  curl -fL https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-osx-arm64-1.28.0.tgz -o "$archive"
+  python3 - "$archive" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], 'rb') as f:
+    if hashlib.sha256(f.read()).hexdigest() != '1268b359718099bde2cedb55787f182a130067bc4f31e8c88478c445b850d3d8':
+        raise SystemExit('ONNX Runtime archive checksum mismatch')
+PY
+  LC_ALL=C tar -xzf "$archive" -C .deps
+fi

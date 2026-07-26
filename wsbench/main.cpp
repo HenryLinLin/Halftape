@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
                 double sum = 0; for (auto& stem : result) sum += stem[c][i];
                 error += std::pow(sum - audio[c][i], 2); power += std::pow(audio[c][i], 2);
             }
-            std::cout << "backend: demucs.cpp+Accelerate\nseconds: " << seconds
+            std::cout << "backend: " << separator.backend() << "\nseconds: " << seconds
                       << "\nrtf: " << seconds / (double(audio[0].size()) / ws::rate)
                       << "\npeak_rss_bytes: " << usage.ru_maxrss
                       << "\nreconstruction_sdr_db: " << 10 * std::log10((power + 1e-30) / (error + 1e-30)) << '\n';

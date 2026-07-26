@@ -7,7 +7,7 @@ void analyze(Clip& clip) {
     if (clip.audio[0].size() < window) return;
     auto fft = vDSP_create_fftsetup(12, kFFTRadix2);
     if (!fft) throw std::bad_alloc();
-    std::array<float, bins> real{}, imag{}, previous{};
+    std::array<float, bins> real{}, imag{}, previous{}, magnitudes{};
     std::array<float, window> hann{};
     for (int i = 0; i < window; ++i) hann[i] = .5f - .5f * std::cos(6.283185307 * i / (window - 1));
     DSPSplitComplex split{real.data(), imag.data()};
@@ -25,12 +25,19 @@ void analyze(Clip& clip) {
             float magnitude = std::sqrt(real[k] * real[k] + imag[k] * imag[k]);
             float compressed = std::log1p(magnitude);
             flux += std::max(0.f, compressed - previous[k]); previous[k] = compressed;
-            double frequency = double(k) * rate / window;
+            magnitudes[k] = magnitude;
+        }
+        float spectralPeak = *std::max_element(magnitudes.begin() + 1, magnitudes.end());
+        for (int k = 2; k < bins - 1; ++k) {
+            if (magnitudes[k] < spectralPeak * .03f || magnitudes[k] <= magnitudes[k-1] || magnitudes[k] <= magnitudes[k+1]) continue;
+            double l = std::log(magnitudes[k-1] + 1e-12), m = std::log(magnitudes[k] + 1e-12), r = std::log(magnitudes[k+1] + 1e-12);
+            double offset = .5 * (l-r) / (l - 2*m + r);
+            double frequency = (k + std::clamp(offset, -.5, .5)) * rate / window;
             if (frequency > 65 && frequency < 2100) {
                 double note = 69 + 12 * std::log2(frequency / 440.);
                 int nearest = int(std::round(note));
-                double weight = std::max(0., 1 - std::abs(note - nearest) * 2);
-                chroma[(nearest % 12 + 12) % 12] += std::sqrt(magnitude) * weight;
+                double weight = std::max(0., 1 - std::abs(note - nearest));
+                chroma[(nearest % 12 + 12) % 12] += magnitudes[k] * weight;
             }
         }
         onset.push_back(flux);
@@ -86,6 +93,7 @@ void analyze(Clip& clip) {
     std::vector<int> positions;
     while (at >= 0) { positions.push_back(at); at = back[at]; }
     std::reverse(positions.begin(), positions.end());
+    // TODO: estimate meters other than four.
     std::array<double, 4> accents{};
     for (size_t i = 0; i < positions.size(); ++i) accents[i % 4] += onset[positions[i]];
     clip.downbeat = int(std::max_element(accents.begin(), accents.end()) - accents.begin());

@@ -110,6 +110,7 @@ void Output::stop() {
     if (impl->unit) { AudioOutputUnitStop(impl->unit); AudioUnitUninitialize(impl->unit); AudioComponentInstanceDispose(impl->unit); impl->unit = nullptr; }
 }
 void Output::start(Render render, void* context) {
+    // TODO: follow output device changes without restarting transport.
     stop(); impl->render = render; impl->context = context;
     try {
         AudioComponentDescription description{kAudioUnitType_Output, kAudioUnitSubType_HALOutput, kAudioUnitManufacturer_Apple, 0, 0};

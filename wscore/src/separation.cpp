@@ -1,16 +1,40 @@
 #include "wscore/separation.hpp"
 #include "model.hpp"
+#ifdef WS_ONNX
+#include "wscore/onnx.hpp"
+#endif
 #include <numeric>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <CommonCrypto/CommonDigest.h>
 namespace ws {
-struct Separator::Impl { std::unique_ptr<demucscpp::demucs_model> model; };
+struct Separator::Impl {
+    std::unique_ptr<demucscpp::demucs_model> model;
+#ifdef WS_ONNX
+    std::unique_ptr<OnnxSeparator> onnx;
+#endif
+};
 Separator::Separator() : impl(std::make_unique<Impl>()) {}
 Separator::~Separator() = default;
-bool Separator::loaded() const { return bool(impl->model); }
-void Separator::unload() { impl->model.reset(); }
+bool Separator::loaded() const {
+#ifdef WS_ONNX
+    if (impl->onnx) return true;
+#endif
+    return bool(impl->model);
+}
+const char* Separator::backend() const {
+#ifdef WS_ONNX
+    if (impl->onnx) return impl->onnx->backend();
+#endif
+    return "demucs.cpp / Accelerate";
+}
+void Separator::unload() {
+    impl->model.reset();
+#ifdef WS_ONNX
+    impl->onnx.reset();
+#endif
+}
 void Separator::load(const std::string& path, int stems) {
     if (stems != 4 && stems != 6) throw std::invalid_argument("expected four or six stems");
     std::ifstream file(path, std::ios::binary);
@@ -22,14 +46,26 @@ void Separator::load(const std::string& path, int stems) {
     unsigned char digest[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(digest, &hash);
     std::ostringstream hex;
     for (auto c : digest) hex << std::hex << std::setfill('0') << std::setw(2) << unsigned(c);
-    const char* expected = stems == 6 ? "09704f4ceae204e56e77d5eefd6ac71d7275be81fd507e6913371d59abcee856" : "72b17c42d308982ddb5069bc3bf48b81a5aac4cb6516e4366c0fa7cef6df0064";
+    bool isOnnx = path.ends_with(".onnx");
+    const char* expected = isOnnx ? (stems == 6 ? "7ce55792e2231c93fbf92de95f5fd5b3a5e6c89f7db690dfd693e8f1dce56869" : "d05c269d0178d2a72ad484b10b11dd370193fc923201c3b27a99f848745db70a") : stems == 6 ? "09704f4ceae204e56e77d5eefd6ac71d7275be81fd507e6913371d59abcee856" : "72b17c42d308982ddb5069bc3bf48b81a5aac4cb6516e4366c0fa7cef6df0064";
     if (hex.str() != expected) throw std::runtime_error("Model checksum differs from the supported demucs.cpp f16 weights");
+    unload();
+    if (isOnnx) {
+#ifdef WS_ONNX
+        impl->onnx = std::make_unique<OnnxSeparator>(path, stems); return;
+#else
+        throw std::runtime_error("This build does not include ONNX Runtime");
+#endif
+    }
     auto model = std::make_unique<demucscpp::demucs_model>();
     if (!demucscpp::load_demucs_model(path, model.get())) throw std::runtime_error("Cannot load Demucs weights");
     if ((model->is_4sources ? 4 : 6) != stems) throw std::runtime_error("Wrong model stem count");
     impl->model = std::move(model);
 }
 Stems Separator::separate(const Stereo& audio, const std::function<void(float)>& progress) {
+#ifdef WS_ONNX
+    if (impl->onnx) return impl->onnx->separate(audio, progress);
+#endif
     if (!impl->model) throw std::runtime_error("Choose htdemucs weights in Settings to enable stems");
     const auto n = audio[0].size();
     Stems result;
@@ -66,8 +102,10 @@ void separateClip(Separator& separator, const Clip& clip, StemBank& bank, double
     auto total = clip.audio[0].size();
     for (auto index : segmentOrder(total, a, b)) {
         if (cancelled()) return;
+        if (bank.blocks[index].load(std::memory_order_acquire)) continue;
         size_t begin = index * segmentFrames, end = std::min(total, begin + segmentFrames);
-        size_t lo = begin > rate ? begin - rate : 0, hi = std::min(total, end + rate);
+        constexpr size_t context = rate * 9 / 10;
+        size_t lo = begin > context ? begin - context : 0, hi = std::min(total, end + context);
         Stereo input;
         for (int c = 0; c < 2; ++c) input[c].assign(clip.audio[c].begin() + lo, clip.audio[c].begin() + hi);
         auto stems = separator.separate(input, [&](float p) { if (cancelled()) throw std::runtime_error("cancelled"); progress((bank.ready.load() + p) / bank.size); });

@@ -1,5 +1,6 @@
 #pragma once
 #include "audio.hpp"
+#include "realtime.hpp"
 #include "separation.hpp"
 #include "signalsmith-stretch.h"
 namespace ws {
@@ -7,16 +8,19 @@ struct Playback { std::shared_ptr<const Clip> clip; std::shared_ptr<StemBank> st
 class Engine {
     std::atomic<Playback*> published{nullptr}, hazard{nullptr};
     std::vector<std::unique_ptr<Playback>> owned;
-    Playback* last = nullptr;
+    uint64_t lastID = 0;
     signalsmith::stretch::SignalsmithStretch<float> stretch{42};
     std::array<std::array<float, 384>, 2> input{};
     double remainder = 0;
     uint32_t position = 0;
     float limitGain = 1;
+    uint64_t countRemaining = 0, countTotal = 0;
     std::array<float, stemCount> smooth{1, 1, 1, 1, 1, 1};
 public:
     std::array<std::atomic<float>, stemCount> gains;
-    std::atomic<bool> playing{false};
+    std::atomic<bool> playing{false}, trainerEnabled{false}, countRequested{false};
+    std::atomic<float> trainerStep{.05f};
+    std::atomic<unsigned> trainerEvery{2};
     std::atomic<float> speed{1}, pitch{0};
     std::atomic<uint64_t> loop{0};
     std::atomic<double> playhead{0};
@@ -35,7 +39,7 @@ public:
         uint32_t start = uint32_t(std::max(0., a) * rate), end = uint32_t(std::max(0., b) * rate);
         loop.store(uint64_t(start) << 32 | end, std::memory_order_release);
     }
-    void render(float* left, float* right, unsigned count) noexcept {
+    void render(float* left, float* right, unsigned count) noexcept WS_REALTIME {
         Playback* data;
         do { data = published.load(std::memory_order_seq_cst); hazard.store(data, std::memory_order_seq_cst); }
         while (data != published.load(std::memory_order_seq_cst));
@@ -47,11 +51,22 @@ public:
         auto range = loop.load(std::memory_order_acquire);
         auto a = std::min(uint32_t(range >> 32), size - 1);
         auto b = std::clamp(uint32_t(range), a + 1, size);
-        if (last != data) { stretch.reset(); last = data; position = a; remainder = 0; loops.store(0); }
+        if (lastID != data->clip->id) { stretch.reset(); lastID = data->clip->id; position = a; remainder = 0; loops.store(0); }
         if (position < a || position >= b) position = a;
         float ratio = std::clamp(speed.load(std::memory_order_relaxed), .25f, 1.5f);
         float transpose = std::clamp(pitch.load(std::memory_order_relaxed), -13.f, 13.f);
         stretch.setTransposeSemitones(transpose);
+        double beatSamples = 60 * rate / std::max(30., data->clip->bpm > 0 ? data->clip->bpm : 120.) / ratio;
+        if (countRequested.exchange(false)) countRemaining = countTotal = uint64_t(beatSamples * 4);
+        if (countRemaining) {
+            for (unsigned i = 0; i < count; ++i) {
+                double phase = std::fmod(double(countTotal - countRemaining), beatSamples);
+                float click = countRemaining && phase < rate * .04 ? float(.2 * std::sin(phase * 6.283185307 * 1200 / rate) * std::exp(-phase / 350)) : 0;
+                left[i] = right[i] = click;
+                if (countRemaining) --countRemaining;
+            }
+            hazard.store(nullptr, std::memory_order_seq_cst); return;
+        }
         for (unsigned offset = 0; offset < count;) {
             unsigned n = std::min(256u, count - offset);
             remainder += n * double(ratio);
@@ -78,7 +93,12 @@ public:
                     }
                     input[c][i] = value;
                 }
-                if (++position >= b) { position = a + fade; loops.fetch_add(1, std::memory_order_relaxed); }
+                if (++position >= b) {
+                    position = a + fade;
+                    auto completed = loops.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (trainerEnabled.load(std::memory_order_relaxed) && completed % std::max(1u, trainerEvery.load()) == 0)
+                        speed.store(std::min(1.f, speed.load() + trainerStep.load()), std::memory_order_relaxed);
+                }
             }
             float* ins[]{input[0].data(), input[1].data()};
             float* outs[]{left + offset, right + offset};

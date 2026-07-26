@@ -1,0 +1,233 @@
+#include "session.hpp"
+#include "wscore/sing.hpp"
+#include "mactap/source_control.hpp"
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <unistd.h>
+namespace ws {
+template<size_t N> static void text(char (&out)[N], const std::string& value) { std::snprintf(out, N, "%s", value.c_str()); }
+static double sane(double x, double lo, double hi) { return std::clamp(std::isfinite(x) ? x : lo, lo, hi); }
+Session::Session() : jobs([this] { separator.unload(); loadedModel.clear(); }) {
+    std::string base = (std::filesystem::temp_directory_path() / "halftape-XXXXXX").string();
+    if (auto* p = mkdtemp(base.data())) tempDir = p;
+}
+Session::~Session() {
+    ++generation; disarm(); output.stop(); jobs.stop();
+    std::error_code ec; if (!tempDir.empty()) std::filesystem::remove_all(tempDir, ec);
+}
+void Session::error(const char* value) { std::lock_guard lock(mutex); message = value ? value : "Unknown error"; }
+void Session::startOutput() {
+    if (outputStarted || std::getenv("HALFTAPE_HEADLESS")) return;
+    output.start([](void* context, float* l, float* r, unsigned n) noexcept {
+        auto& self = *static_cast<Session*>(context);
+        if (self.sing) self.sing->render(l, r, n); else self.engine.render(l, r, n);
+    }, this);
+    outputStarted = true;
+}
+int Session::sources(WSSource* out, int capacity) {
+    auto list = ws::sources(); int count = std::min(int(list.size()), std::max(0, capacity));
+    for (int i = 0; i < count; ++i) { out[i] = {}; out[i].id = list[i].id; out[i].active = list[i].active; text(out[i].name, list[i].name); text(out[i].bundle, list[i].bundle); }
+    return count;
+}
+void Session::disarm() {
+    captureStop.store(true); if (captureThread.joinable()) captureThread.join();
+    tap.stop();
+    if (sing) { output.stop(); outputStarted = false; sing.reset(); }
+    capture.reset(); source = 0;
+}
+int Session::arm(uint32_t id) {
+    disarm();
+    auto available = ws::sources();
+    auto it = std::find_if(available.begin(), available.end(), [id](auto& s) { return s.id == id; });
+    if (it == available.end()) throw std::runtime_error("This audio app has closed. Refresh the source list.");
+    double sr = tap.start(id, false);
+    source = id; sourceName = it->name; sourceBundle = it->bundle;
+    capture = std::make_unique<CaptureStore>(unsigned(sr));
+    captureStop.store(false);
+    captureThread = std::thread([this] {
+        std::array<Frame, 2048> frames;
+        while (!captureStop.load()) {
+            size_t n = 0; while (n < frames.size() && tap.queue.pop(frames[n])) ++n;
+            if (n) { capture->append(frames.data(), n); if (sing) for (size_t i = 0; i < n; ++i) sing->feed(frames[i]); }
+            else std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+    error(("Buffering " + sourceName).c_str());
+    return 1;
+}
+void Session::activate(const Item& item) {
+    active = item; gridOffset = 0;
+    engine.publish(std::make_unique<Playback>(Playback{item.clip, item.stems}));
+    engine.setLoop(0, std::min(8., item.clip->seconds()));
+    engine.playing.store(true);
+    if (counting) engine.countRequested.store(true);
+}
+void Session::submitClip(Stereo audio, unsigned sampleRate, std::string title) {
+    auto ticket = ++generation;
+    busy.store(true); progress.store(0);
+    std::string path = sixPath;
+    jobs.submit([this, ticket, audio = std::move(audio), sampleRate, title, path]() mutable {
+        try {
+            auto clip = std::make_shared<Clip>();
+            clip->audio = resample(audio, sampleRate); trim(clip->audio);
+            if (clip->audio[0].empty()) throw std::runtime_error("No audio captured. Play the source and allow Halftape in Privacy & Security → Screen & System Audio Recording. Some protected streams may be unavailable.");
+            clip->id = ticket;
+            ws::waveform(*clip); analyze(*clip);
+            if (ticket != generation.load()) return;
+            Item item{clip, std::make_shared<StemBank>(clip->audio[0].size()), title};
+            if (!tempDir.empty()) {
+                std::ofstream file(tempDir / (std::to_string(clip->id) + ".pcm"), std::ios::binary);
+                for (auto& c : clip->audio) file.write(reinterpret_cast<const char*>(c.data()), c.size() * sizeof(float));
+            }
+            {
+                std::lock_guard lock(mutex);
+                history.push_front(item);
+                if (history.size() > 20) {
+                    std::error_code ec; std::filesystem::remove(tempDir / (std::to_string(history.back().clip->id) + ".pcm"), ec); history.pop_back();
+                }
+                activate(item);
+                message = path.empty() ? "Original audio ready. Choose a six-stem model in Settings to separate it." : "Separating the loop first…";
+            }
+            separate(item, ticket, path);
+        } catch (const std::exception& e) { if (ticket == generation.load()) error(e.what()); }
+        if (ticket == generation.load()) busy.store(false);
+    }, true);
+}
+void Session::separate(Item item, uint64_t ticket, std::string path) {
+    if (path.empty()) return;
+    if (path != loadedModel || !separator.loaded()) { separator.load(path, 6); loadedModel = path; }
+    if (ticket != generation.load()) return;
+    auto range = engine.loop.load();
+    separateClip(separator, *item.clip, *item.stems, double(range >> 32) / rate, double(uint32_t(range)) / rate,
+                 [&] { return ticket != generation.load(); }, [&](float p) { if (ticket == generation.load()) progress.store(p); });
+    if (ticket == generation.load()) error("Six stems ready · guitar and piano are experimental");
+}
+void Session::grab(double seconds) {
+    if (sing) setSing(false);
+    if (!capture) throw std::runtime_error("Arm an audio app before grabbing.");
+    auto audio = capture->grab(sane(seconds, 1, 180));
+    startOutput(); submitClip(std::move(audio), capture->sample_rate(), "Grabbed from " + sourceName);
+    if (pauseSource) pauseSourceApp(sourceBundle);
+}
+void Session::demo() {
+    if (sing) setSing(false);
+    Stereo audio; for (auto& c : audio) c.resize(12 * rate);
+    for (size_t i = 0; i < audio[0].size(); ++i) {
+        double t = double(i) / rate, beat = std::fmod(t, .5);
+        float x = .13 * (std::sin(t * 6.283185307 * 220) + .6 * std::sin(t * 6.283185307 * 261.6256) + .5 * std::sin(t * 6.283185307 * 329.6276));
+        x += .3 * std::exp(-beat * 55) * std::sin(beat * 6.283185307 * 90);
+        audio[0][i] = x; audio[1][i] = x * .9f;
+    }
+    startOutput(); submitClip(std::move(audio), rate, "Demo · A minor / 120 BPM");
+}
+void Session::status(WSStatus* s) {
+    *s = {}; s->key = -1;
+    s->buffered = capture ? capture->buffered() : 0;
+    s->busy = busy.load(); s->progress = progress.load();
+    s->capture_drops = tap.dropped.load();
+    s->position = engine.playhead.load(); s->playing = engine.playing.load(); s->loops = engine.loops.load();
+    s->speed = engine.speed.load(); s->pitch = sing ? sing->pitch.load() : engine.pitch.load();
+    s->sing = bool(sing); s->quality = sing ? sing->quality.load() : 0;
+    s->sing_latency = sing ? sing->delay() : 0; s->vocal_removal = sing ? sing->removal.load() : 1;
+    s->underruns = sing ? sing->underruns.load() : 0;
+    auto range = engine.loop.load(); s->loop_a = double(range >> 32) / rate; s->loop_b = double(uint32_t(range)) / rate;
+    std::lock_guard lock(mutex);
+    engine.collect(); s->history_count = int(history.size()); text(s->message, message);
+    if (active.clip) { s->duration = active.clip->seconds(); s->bpm = active.clip->bpm; s->key = active.clip->key; s->clip_id = active.clip->id; }
+}
+void Session::play(bool value) { if (value) { startOutput(); if (counting) engine.countRequested.store(true); } engine.playing.store(value); }
+void Session::speed(float value) { engine.speed.store(sane(value, .25, 1.5)); }
+void Session::pitch(float value) { if (sing) sing->pitch.store(sane(value, -6, 6)); else engine.pitch.store(sane(value, -13, 13)); }
+void Session::loop(double a, double b, bool snap) {
+    std::lock_guard lock(mutex); if (!active.clip) return;
+    auto& clip = *active.clip;
+    if (snap && !clip.beats.empty()) {
+        auto nearest = [&](double t) { return *std::min_element(clip.beats.begin(), clip.beats.end(), [&](double x, double y) { return std::abs(x + gridOffset - t) < std::abs(y + gridOffset - t); }) + gridOffset; };
+        a = nearest(a); b = nearest(b);
+    }
+    a = sane(a, 0, std::max(0., clip.seconds() - .02)); b = sane(b, a + .02, std::max(a + .02, clip.seconds()));
+    engine.setLoop(a, b);
+}
+void Session::grid(double value) { gridOffset = sane(value, -2, 2); }
+void Session::stem(int index, float level, bool mute, bool solo) {
+    if (index < 0 || index >= 6) return;
+    gain[index] = sane(level, 0, 2); muted[index] = mute; soloed[index] = solo;
+    bool hasSolo = std::any_of(soloed.begin(), soloed.end(), [](bool x) { return x; });
+    for (int i = 0; i < 6; ++i) engine.gains[i].store(muted[i] || (hasSolo && !soloed[i]) ? 0 : gain[i]);
+}
+void Session::trainer(bool enabled, float start, float step, int every) {
+    engine.trainerEnabled.store(enabled); engine.trainerStep.store(sane(step, .01, .5)); engine.trainerEvery.store(std::clamp(every, 1, 100));
+    if (enabled) { engine.speed.store(sane(start, .25, 1)); engine.loops.store(0); }
+}
+void Session::countIn(bool enabled) { counting = enabled; }
+int Session::waveform(float* out, int cap) {
+    std::lock_guard lock(mutex); if (!active.clip) return 0;
+    int n = std::min(std::max(0, cap), int(active.clip->peaks.size())); std::copy_n(active.clip->peaks.data(), n, out); return n;
+}
+int Session::beats(double* out, int cap) {
+    std::lock_guard lock(mutex); if (!active.clip) return 0;
+    int n = std::min(std::max(0, cap), int(active.clip->beats.size()));
+    for (int i = 0; i < n; ++i) out[i] = active.clip->beats[i] + gridOffset; return n;
+}
+int Session::histories(WSHistory* out, int cap) {
+    std::lock_guard lock(mutex); int n = std::min(std::max(0, cap), int(history.size()));
+    for (int i = 0; i < n; ++i) { out[i] = {}; out[i].id = history[i].clip->id; out[i].duration = history[i].clip->seconds(); text(out[i].title, history[i].title); }
+    return n;
+}
+void Session::select(uint64_t id) {
+    if (sing) setSing(false);
+    ++generation; busy.store(false); startOutput();
+    Item item;
+    {
+        std::lock_guard lock(mutex);
+        auto i = std::find_if(history.begin(), history.end(), [id](auto& x) { return x.clip->id == id; });
+        if (i == history.end()) return;
+        activate(*i); item = *i;
+    }
+    if (!sixPath.empty() && item.stems->ready.load() < item.stems->size) {
+        auto ticket = generation.load(); std::string path = sixPath; busy.store(true);
+        jobs.submit([this, item, ticket, path] {
+            try { separate(item, ticket, path); } catch (const std::exception& e) { if (ticket == generation.load()) error(e.what()); }
+            if (ticket == generation.load()) busy.store(false);
+        }, true);
+    }
+}
+void Session::model(const char* six, const char* four) {
+    sixPath = six ? six : ""; fourPath = four ? four : "";
+    Item item;
+    { std::lock_guard lock(mutex); item = active; }
+    if (item.clip && !sixPath.empty() && !sing) {
+        auto ticket = ++generation; busy.store(true); std::string path = sixPath;
+        jobs.submit([this, item, ticket, path] {
+            try { separate(item, ticket, path); } catch (const std::exception& e) { if (ticket == generation.load()) error(e.what()); }
+            if (ticket == generation.load()) busy.store(false);
+        }, true);
+    }
+}
+void Session::setSing(bool enabled) {
+    if (enabled == bool(sing)) return;
+    if (!source) throw std::runtime_error("Arm an audio app before starting Sing.");
+    ++generation; busy.store(false);
+    auto id = source; auto name = sourceName; auto bundle = sourceBundle;
+    disarm(); output.stop(); outputStarted = false;
+    if (!enabled) { arm(id); startOutput(); error("Sing stopped. The source is audible again."); return; }
+    try {
+        double sr = tap.start(id, true);
+        capture = std::make_unique<CaptureStore>(unsigned(sr));
+        sing = std::make_unique<Sing>(unsigned(sr), sixPath, fourPath);
+        source = id; sourceName = name; sourceBundle = bundle;
+        startOutput(); captureStop.store(false); engine.playing.store(false);
+        captureThread = std::thread([this] {
+            std::array<Frame, 2048> frames;
+            while (!captureStop.load()) {
+                size_t n = 0; while (n < frames.size() && tap.queue.pop(frames[n])) ++n;
+                if (n) { capture->append(frames.data(), n); for (size_t i = 0; i < n; ++i) sing->feed(frames[i]); }
+                else std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        });
+        error("Sing is delayed by its processing buffer. Lyrics in the source app will run early.");
+    } catch (...) { disarm(); throw; }
+}
+void Session::vocals(float amount) { if (sing) sing->removal.store(sane(amount, 0, 1)); }
+}
