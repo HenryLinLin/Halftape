@@ -18,7 +18,7 @@ public:
     Stems separate(const Stereo& audio, const std::function<void(float)>& progress = {});
 };
 constexpr unsigned segmentFrames = 6 * rate;
-struct StemBlock { Stems audio; };
+struct StemBlock { Stems audio; uint32_t offset = 0; };
 struct StemBank {
     size_t size;
     std::vector<std::unique_ptr<StemBlock>> owned;

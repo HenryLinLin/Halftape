@@ -48,7 +48,7 @@ void Separator::load(const std::string& path, int stems) {
     for (auto c : digest) hex << std::hex << std::setfill('0') << std::setw(2) << unsigned(c);
     bool isOnnx = path.ends_with(".onnx");
     const char* expected = isOnnx ? (stems == 6 ? "7ce55792e2231c93fbf92de95f5fd5b3a5e6c89f7db690dfd693e8f1dce56869" : "d05c269d0178d2a72ad484b10b11dd370193fc923201c3b27a99f848745db70a") : stems == 6 ? "09704f4ceae204e56e77d5eefd6ac71d7275be81fd507e6913371d59abcee856" : "72b17c42d308982ddb5069bc3bf48b81a5aac4cb6516e4366c0fa7cef6df0064";
-    if (hex.str() != expected) throw std::runtime_error("Model checksum differs from the supported demucs.cpp f16 weights");
+    if (hex.str() != expected) throw std::runtime_error("Model checksum differs from the supported weights. Use scripts/models.sh to download a compatible model.");
     unload();
     if (isOnnx) {
 #ifdef WS_ONNX
@@ -111,8 +111,8 @@ void separateClip(Separator& separator, const Clip& clip, StemBank& bank, double
         auto stems = separator.separate(input, [&](float p) { if (cancelled()) throw std::runtime_error("cancelled"); progress((bank.ready.load() + p) / bank.size); });
         if (cancelled()) return;
         auto block = std::make_unique<StemBlock>();
-        for (int s = 0; s < stemCount; ++s) for (int c = 0; c < 2; ++c)
-            block->audio[s][c].assign(stems[s][c].begin() + begin - lo, stems[s][c].begin() + end - lo);
+        block->audio = std::move(stems);
+        block->offset = uint32_t(begin - lo);
         bank.publish(index, std::move(block));
         progress(float(bank.ready.load()) / bank.size);
     }

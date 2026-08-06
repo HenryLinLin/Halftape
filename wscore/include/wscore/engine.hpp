@@ -4,7 +4,13 @@
 #include "separation.hpp"
 #include "signalsmith-stretch.h"
 namespace ws {
-struct Playback { std::shared_ptr<const Clip> clip; std::shared_ptr<StemBank> stems; };
+struct Playback {
+    std::shared_ptr<const Clip> clip;
+    std::shared_ptr<StemBank> stems;
+    std::unique_ptr<float[]> blend;
+    Playback(std::shared_ptr<const Clip> clip, std::shared_ptr<StemBank> stems = {})
+        : clip(std::move(clip)), stems(std::move(stems)), blend(this->stems ? std::make_unique<float[]>(this->stems->size) : nullptr) {}
+};
 class Engine {
     std::atomic<Playback*> published{nullptr}, hazard{nullptr};
     std::vector<std::unique_ptr<Playback>> owned;
@@ -75,15 +81,36 @@ public:
                 if (data->stems) {
                     auto* block = data->stems->blocks[frame / segmentFrames].load(std::memory_order_acquire);
                     if (block) {
-                        float sum = 0;
-                        for (unsigned s = 0; s < stemCount; ++s) sum += block->audio[s][channel][frame % segmentFrames] * smooth[s];
-                        return sum;
+                        unsigned index = frame / segmentFrames, local = frame % segmentFrames;
+                        auto mix = [&](const StemBlock* source, size_t at) {
+                            float value = 0;
+                            for (unsigned s = 0; s < stemCount; ++s) value += source->audio[s][channel][at] * smooth[s];
+                            return value;
+                        };
+                        float sum = mix(block, local + block->offset);
+                        if (index && local < rate * 9 / 10) {
+                            auto* previous = data->stems->blocks[index - 1].load(std::memory_order_acquire);
+                            size_t at = segmentFrames + local + (previous ? previous->offset : 0);
+                            if (previous && at < previous->audio[0][0].size()) {
+                                float t = float(local) / (rate * .9f);
+                                sum = sum * t + mix(previous, at) * (1 - t);
+                            }
+                        }
+                        float blend = data->blend[index];
+                        return sum * blend + data->clip->audio[channel][frame] * (1 - blend);
                     }
                 }
                 return data->clip->audio[channel][frame];
             };
             unsigned fade = std::min(441u, (b - a) / 4);
             for (unsigned i = 0; i < needed; ++i) {
+                auto reveal = [&](unsigned frame) {
+                    if (!data->stems) return;
+                    auto index = frame / segmentFrames;
+                    if (data->stems->blocks[index].load(std::memory_order_acquire)) data->blend[index] = std::min(1.f, data->blend[index] + .002f);
+                };
+                reveal(position);
+                if (fade && position >= b - fade) reveal(a + position - (b - fade));
                 for (unsigned s = 0; s < stemCount; ++s) smooth[s] += .002f * (gains[s].load(std::memory_order_relaxed) - smooth[s]);
                 for (int c = 0; c < 2; ++c) {
                     float value = sample(position, c);
