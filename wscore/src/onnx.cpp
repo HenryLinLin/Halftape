@@ -20,9 +20,9 @@ OnnxSeparator::OnnxSeparator(const std::string& path, int stems) : impl(std::mak
         return opts;
     };
     auto opts = options();
-    if (!std::getenv("HALFTAPE_ONNX_CPU")) {
+    if (std::getenv("HALFTAPE_ONNX_COREML") && !std::getenv("HALFTAPE_ONNX_CPU")) {
         try {
-            Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(opts, COREML_FLAG_CREATE_MLPROGRAM | COREML_FLAG_ONLY_ALLOW_STATIC_INPUT_SHAPES));
+            Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(opts, COREML_FLAG_ONLY_ALLOW_STATIC_INPUT_SHAPES));
             impl->session = std::make_unique<Ort::Session>(impl->env, path.c_str(), opts);
             impl->coreml = true;
         } catch (const Ort::Exception&) { impl->session.reset(); }
