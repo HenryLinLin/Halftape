@@ -6,9 +6,10 @@
 #include "signalsmith-stretch.h"
 #include <thread>
 namespace ws {
-struct SingFrame { float l, r, vl, vr; };
+struct SingInput { Frame audio; uint64_t position; };
+struct SingFrame { float l, r, vl, vr; uint64_t position; };
 class Sing {
-    Spsc<Frame, 1048576> input;
+    Spsc<SingInput, 1048576> input;
     Spsc<SingFrame, 524288> ready;
     std::thread worker;
     std::atomic<bool> quit{false};
@@ -31,8 +32,8 @@ public:
         worker = std::thread([this, six, four] { run(six, four); });
     }
     ~Sing() { quit.store(true); if (worker.joinable()) worker.join(); }
-    void feed(Frame frame) noexcept { captured.fetch_add(1, std::memory_order_relaxed); if (!input.push(frame)) dropped.fetch_add(1, std::memory_order_relaxed); }
-    double delay() const noexcept { return std::max(0., double(captured.load()) / sourceRate - double(consumed.load()) / rate); }
+    void feed(Frame frame) noexcept { auto position = captured.fetch_add(1, std::memory_order_relaxed); if (!input.push({frame, position})) dropped.fetch_add(1, std::memory_order_relaxed); }
+    double delay() const noexcept { return std::max(0., (double(captured.load()) - double(consumed.load())) / sourceRate); }
     void render(float* left, float* right, unsigned count) noexcept WS_REALTIME;
 };
 }

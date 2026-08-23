@@ -7,10 +7,20 @@ void Sing::run(std::string six, std::string four) {
     Stereo chunk;
     for (auto& c : chunk) c.reserve(window);
     std::vector<SingFrame> overlap;
-    uint64_t seenDrops = 0;
+    uint64_t seenDrops = 0, chunkStart = 0, expected = 0;
     while (!quit.load()) {
-        Frame f;
-        while (chunk[0].size() < window && input.pop(f)) { chunk[0].push_back(f.l); chunk[1].push_back(f.r); }
+        SingInput f;
+        if (input.size() > window) {
+            for (auto& c : chunk) c.clear();
+            overlap.clear();
+            while (input.size() > window && input.pop(f)) dropped.fetch_add(1, std::memory_order_relaxed);
+        }
+        while (chunk[0].size() < window && input.pop(f)) {
+            if (f.position != expected) { for (auto& c : chunk) c.clear(); overlap.clear(); }
+            if (chunk[0].empty()) chunkStart = f.position;
+            expected = f.position + 1;
+            chunk[0].push_back(f.audio.l); chunk[1].push_back(f.audio.r);
+        }
         if (chunk[0].size() < window) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
         auto start = std::chrono::steady_clock::now();
         auto audio = resample(chunk, sourceRate);
@@ -33,7 +43,7 @@ void Sing::run(std::string six, std::string four) {
             float l = audio[0][i], r = audio[1][i];
             float vl = level < 2 ? stems[0][0][i] : (l + r) * .5f;
             float vr = level < 2 ? stems[0][1][i] : (l + r) * .5f;
-            result[i] = {l, r, vl, vr};
+            result[i] = {l, r, vl, vr, chunkStart + uint64_t(double(i + 1) * sourceRate / rate)};
         }
         for (size_t i = 0; i < overlap.size() && i < result.size(); ++i) {
             float t = float(i) / overlap.size();
@@ -53,6 +63,7 @@ void Sing::run(std::string six, std::string four) {
         }
         seenDrops = dropped.load();
         for (auto& c : chunk) c.erase(c.begin(), c.begin() + stride);
+        chunkStart += stride;
         // TODO: ease back up the quality ladder after thermal recovery.
     }
 }
@@ -70,7 +81,7 @@ void Sing::render(float* left, float* right, unsigned count) noexcept WS_REALTIM
         for (unsigned i = 0; i < need; ++i) {
             SingFrame f{};
             if (!ready.pop(f)) { underruns.fetch_add(1, std::memory_order_relaxed); primed = false; }
-            else consumed.fetch_add(1, std::memory_order_relaxed);
+            else consumed.store(f.position, std::memory_order_relaxed);
             mixed[0][i] = f.l - amount * f.vl; mixed[1][i] = f.r - amount * f.vr;
         }
         float* ins[]{mixed[0].data(), mixed[1].data()};

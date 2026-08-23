@@ -209,6 +209,7 @@ void Session::setSing(bool enabled) {
     if (enabled == bool(sing)) return;
     if (!source) throw std::runtime_error("Arm an audio app before starting Sing.");
     ++generation; busy.store(false);
+    if (enabled) jobs.submit([this] { separator.unload(); loadedModel.clear(); }, true);
     auto id = source; auto name = sourceName; auto bundle = sourceBundle;
     disarm(); output.stop(); outputStarted = false;
     if (!enabled) { arm(id); startOutput(); error("Sing stopped. The source is audible again."); return; }
