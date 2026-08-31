@@ -1,4 +1,5 @@
 #include "wscore/engine.hpp"
+#include "wscore/sing.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <thread>
@@ -35,6 +36,16 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     finished = true; audio.join();
+    {
+        ws::Sing sing(48000, "", "");
+        for (unsigned i = 0; i < 48000 * 7; ++i) sing.feed({.2f, -.2f});
+        float left[256], right[256];
+        for (int i = 0; i < 300; ++i) {
+            rendering = true; sing.render(left, right, 256); rendering = false;
+            for (auto x : left) if (!std::isfinite(x) || std::abs(x) > .981) ++invalid;
+            if (i < 20) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
     std::cout << "render allocations/frees: " << allocations << ", invalid samples: " << invalid << '\n';
     return allocations || invalid ? 1 : 0;
 }
