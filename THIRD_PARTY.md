@@ -17,4 +17,4 @@ The MIT license texts for vendored components are in `.deps/`. Eigen's MPL-2.0 t
 
 Model files are downloaded or selected separately and are not included in the app bundle.
 
-The `htdemucs` and `htdemucs_6s` files are pretrained Demucs weights, converted to ONNX by [StemSplit](https://huggingface.co/StemSplitio/htdemucs-6s-onnx). The upstream [pretrained-weight discussion](https://github.com/facebookresearch/demucs/issues/327) describes scientific-use terms. The software's MIT license does not establish a separate redistribution grant for the weights.
+The `htdemucs` and `htdemucs_6s` files downloaded by `scripts/models.sh` are pretrained Demucs weights, converted to ONNX by [StemSplit](https://huggingface.co/StemSplitio/htdemucs-6s-onnx). The upstream [pretrained-weight discussion](https://github.com/facebookresearch/demucs/issues/327) describes scientific-use terms. The software's MIT license does not establish a separate redistribution grant for the weights.
