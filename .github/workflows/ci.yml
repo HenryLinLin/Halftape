@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bootstrap pinned dependencies
+        run: scripts/bootstrap.sh
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel 3
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Build app bundle
+        run: scripts/build-app.sh
+
+  realtime-sanitizer:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM
+        run: brew install llvm
+      - name: Bootstrap pinned dependencies
+        run: scripts/bootstrap.sh
+      - name: Configure with RealtimeSanitizer
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          CC="$LLVM_PREFIX/bin/clang" CXX="$LLVM_PREFIX/bin/clang++" \
+            cmake -S . -B build-rtsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DWS_RTSAN=ON
+      - name: Build realtime sanitizer tests
+        run: cmake --build build-rtsan --target rt_tests --parallel 3
+      - name: Run realtime sanitizer tests
+        run: ctest --test-dir build-rtsan -R rt_tests --output-on-failure
