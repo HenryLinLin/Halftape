@@ -328,7 +328,8 @@ struct PracticeView: View {
         if key == "[" { nudgeEndpoint(-1); return nil }; if key == "]" { nudgeEndpoint(1); return nil }
         if key == "," { speed=max(0.25,speed-0.05); m.setSpeed(speed); return nil }; if key == "." { speed=min(1.5,speed+0.05); m.setSpeed(speed); return nil }
         if key == "-" { pitch=max(-12,pitch-1); m.setPitch(pitch+cents/100); return nil }; if key == "=" { pitch=min(12,pitch+1); m.setPitch(pitch+cents/100); return nil }
-        if (18...23).contains(Int(event.keyCode)) { let i = Int(event.keyCode) - 18; if event.modifierFlags.contains(.shift) { m.mutes[i].toggle() } else { m.solos[i].toggle() }; m.updateStem(i); return nil }
+        let digitKeys: [Int: Int] = [18: 0, 19: 1, 20: 2, 21: 3, 23: 4, 22: 5]
+        if let i = digitKeys[Int(event.keyCode)] { if event.modifierFlags.contains(.shift) { m.mutes[i].toggle() } else { m.solos[i].toggle() }; m.updateStem(i); return nil }
         return event
     } }
 }
