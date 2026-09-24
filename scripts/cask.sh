@@ -1,16 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
-cd "$(dirname "$0")/.."
+repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: scripts/cask.sh ACTUAL_HTTPS_DMG_URL path/to/Halftape-0.1.0.dmg" >&2
-  exit 2
-fi
-url="$1"
-dmg="$2"
-if [[ "$url" != https://* || "$url" == *'"'* || "$url" == *"'"* || "$url" == *'\'* || "$url" =~ [[:space:][:cntrl:]] ]]; then
-  echo "Supply the actual HTTPS URL for the published DMG." >&2
+if [[ $# -eq 1 ]]; then
+  dmg="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$1")"
+  if [[ ! -f "$dmg" ]]; then
+    echo "DMG file not found: $dmg" >&2
+    exit 1
+  fi
+  url="file://$(python3 -c 'from urllib.parse import quote; import sys; print(quote(sys.argv[1], safe="/"))' "$dmg")"
+elif [[ $# -eq 2 ]]; then
+  url="$1"
+  dmg="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$2")"
+  if [[ "$url" != https://* || "$url" == *'"'* || "$url" == *"'"* || "$url" == *'\'* || "$url" =~ [[:space:][:cntrl:]] ]]; then
+    echo "Supply the actual HTTPS URL for the published DMG." >&2
+    exit 2
+  fi
+else
+  echo "Usage: scripts/cask.sh path/to/Halftape-0.1.0.dmg | ACTUAL_HTTPS_DMG_URL path/to/Halftape-0.1.0.dmg" >&2
   exit 2
 fi
 if [[ ! -f "$dmg" ]]; then
@@ -18,6 +26,7 @@ if [[ ! -f "$dmg" ]]; then
   exit 1
 fi
 
+cd "$repo_dir"
 sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
 url_ruby="${url//\\/\\\\}"
 url_ruby="${url_ruby//\'/\\\'}"
