@@ -5,9 +5,9 @@ build_dir="${1:-build}"
 cmake --build "$build_dir" --target wsbridge -j3
 app="$build_dir/Halftape.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/licenses" "$app/Contents/Frameworks"
-ort_dir=.deps/onnxruntime-osx-arm64-1.28.0
-cp "$ort_dir/lib/libonnxruntime.1.28.0.dylib" "$app/Contents/Frameworks/"
-ln -sf libonnxruntime.1.28.0.dylib "$app/Contents/Frameworks/libonnxruntime.1.dylib"
+ort_dir=.deps/onnxruntime-osx-arm64-1.30.0
+cp "$ort_dir/lib/libonnxruntime.1.30.0.dylib" "$app/Contents/Frameworks/"
+ln -sf libonnxruntime.1.30.0.dylib "$app/Contents/Frameworks/libonnxruntime.1.dylib"
 cp HalftapeApp/Info.plist "$app/Contents/Info.plist"
 xcrun swiftc -O -parse-as-library -target arm64-apple-macos14.4 \
   -module-cache-path "$build_dir/swift-cache" \
@@ -26,6 +26,6 @@ cp .deps/demucs/vendor/eigen/COPYING.MPL2 "$app/Contents/Resources/licenses/Eige
 cp .deps/demucs/vendor/eigen/COPYING.BSD "$app/Contents/Resources/licenses/Eigen-BSD.txt"
 cp "$ort_dir/LICENSE" "$app/Contents/Resources/licenses/ONNX-Runtime.txt"
 cp "$ort_dir/ThirdPartyNotices.txt" "$app/Contents/Resources/licenses/ONNX-ThirdPartyNotices.txt"
-codesign --force --sign - "$app/Contents/Frameworks/libonnxruntime.1.28.0.dylib"
+codesign --force --sign - "$app/Contents/Frameworks/libonnxruntime.1.30.0.dylib"
 codesign --force --deep --sign - "$app"
 echo "$app"

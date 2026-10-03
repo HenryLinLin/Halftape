@@ -9,7 +9,7 @@ Halftape uses the following third-party components. Their notices and license te
 | r8brain-free-src | MIT | Copyright (c) 2013–2026 Aleksey Vaneev. Documentation credit: “Sample rate converter designed by Aleksey Vaneev of Voxengo”. [Source](https://github.com/avaneev/r8brain-free-src) |
 | demucs.cpp | MIT | Copyright (c) 2023 Sevag H. [Source](https://github.com/sevagh/demucs.cpp) |
 | Eigen | MPL 2.0 | Vendored by demucs.cpp. [License](https://eigen.tuxfamily.org/index.php?title=Licensing_FAQ) |
-| ONNX Runtime 1.28.0 | MIT | The app bundle includes the macOS arm64 runtime, license, and third-party notices. [License](https://github.com/microsoft/onnxruntime/blob/v1.28.0/LICENSE), [notices](https://github.com/microsoft/onnxruntime/blob/v1.28.0/ThirdPartyNotices.txt) |
+| ONNX Runtime 1.30.0 | MIT | The app bundle includes the macOS arm64 runtime, license, and third-party notices. [License](https://github.com/microsoft/onnxruntime/blob/v1.30.0/LICENSE), [notices](https://github.com/microsoft/onnxruntime/blob/v1.30.0/ThirdPartyNotices.txt) |
 
 The MIT license texts for vendored components are in `.deps/`. Eigen's MPL-2.0 text is in `.deps/demucs/vendor/eigen/COPYING.MPL2`.
 
