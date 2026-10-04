@@ -103,16 +103,18 @@ double Tap::start(uint32_t source, bool mute) {
         } catch (...) { stop(); throw; }
     }
 }
-struct Output::Impl { AudioUnit unit = nullptr; Render render = nullptr; void* context = nullptr; };
+struct Output::Impl { AudioUnit unit = nullptr; Render render = nullptr; void* context = nullptr; id activity = nil; };
 Output::Output() : impl(std::make_unique<Impl>()) {}
 Output::~Output() { stop(); }
 void Output::stop() {
     if (impl->unit) { AudioOutputUnitStop(impl->unit); AudioUnitUninitialize(impl->unit); AudioComponentInstanceDispose(impl->unit); impl->unit = nullptr; }
+    if (impl->activity) { [NSProcessInfo.processInfo endActivity:impl->activity]; impl->activity = nil; }
 }
-void Output::start(Render render, void* context) {
+void Output::start(Render render, void* context, bool live) {
     // TODO: follow output device changes without restarting transport.
     stop(); impl->render = render; impl->context = context;
     try {
+        if (live) impl->activity = [NSProcessInfo.processInfo beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical reason:@"Live audio playback"];
         AudioComponentDescription description{kAudioUnitType_Output, kAudioUnitSubType_HALOutput, kAudioUnitManufacturer_Apple, 0, 0};
         check(AudioComponentInstanceNew(AudioComponentFindNext(nullptr, &description), &impl->unit), "Create playback output");
         auto device = property<AudioObjectID>(kAudioObjectSystemObject, kAudioHardwarePropertyDefaultOutputDevice);

@@ -27,6 +27,7 @@ private func cString<T>(_ bytes: T) -> String {
 @MainActor final class PracticeModel: ObservableObject {
     let ws: OpaquePointer
     @Published var status = WSStatus()
+    @Published var lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
     @Published var sources: [WSSource] = []
     var armedSourceName: String { sources.first(where: { $0.id == sourceId }).map { cString($0.name) } ?? "Halftape" }
     var capturedSourceName: String { let name = cString(status.capture_name); return name.isEmpty ? armedSourceName : name }
@@ -56,6 +57,7 @@ private func cString<T>(_ bytes: T) -> String {
     @Published var heldGrab = false
     @Published var modelSix = UserDefaults.standard.string(forKey: "modelSix") ?? ""
     @Published var modelFour = UserDefaults.standard.string(forKey: "modelFour") ?? ""
+    @Published var modelSing = UserDefaults.standard.string(forKey: "modelSing") ?? ""
     @Published var gains = Array(repeating: 1.0, count: 6)
     @Published var mutes = Array(repeating: false, count: 6)
     @Published var solos = Array(repeating: false, count: 6)
@@ -84,6 +86,7 @@ private func cString<T>(_ bytes: T) -> String {
         hotkeys = HotKeyController(model: self)
         discoverModelsIfNeeded()
         setModels()
+        setSingModel()
         refreshSources()
         ws_count_in(ws, countIn ? 1 : 0)
         poller = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in guard let model = self else { return }; MainActor.assumeIsolated { model.poll() } }
@@ -109,6 +112,8 @@ private func cString<T>(_ bytes: T) -> String {
     func poll() {
         guard !closed else { return }
         ws_status(ws, &status)
+        let lowPowerModeNow = ProcessInfo.processInfo.isLowPowerModeEnabled
+        if lowPowerMode != lowPowerModeNow { lowPowerMode = lowPowerModeNow }
         var wave = Array(repeating: Float(0), count: 1024)
         let wn = ws_waveform(ws, &wave, Int32(wave.count)); waveform = Array(wave.prefix(max(0, Int(wn))))
         var grid = Array(repeating: Double(0), count: 512)
@@ -147,7 +152,21 @@ private func cString<T>(_ bytes: T) -> String {
             }
         }
     }
+    func singModelPicker() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [UTType(filenameExtension: "onnx") ?? .data]
+        p.allowsMultipleSelection = false
+        p.message = "Choose the StemGenRT hop-128 ONNX model"
+        p.begin { [weak self] response in guard response == .OK, let path = p.url?.path else { return }
+            Task { @MainActor in
+                self?.modelSing = path
+                UserDefaults.standard.set(path, forKey: "modelSing")
+                self?.setSingModel()
+            }
+        }
+    }
     func setModels() { modelSix.withCString { a in modelFour.withCString { b in ws_set_model(ws, a, b) } } }
+    func setSingModel() { modelSing.withCString { ws_set_sing_model(ws, $0) } }
     private func discoverModelsIfNeeded() {
         let fileManager = FileManager.default
         var folders: [URL] = []
@@ -167,6 +186,10 @@ private func cString<T>(_ bytes: T) -> String {
         if !usable(modelSix) {
             modelSix = folders.map { $0.appendingPathComponent("htdemucs_6s.onnx").path }.first(where: usable) ?? ""
             UserDefaults.standard.set(modelSix, forKey: "modelSix")
+        }
+        if !usable(modelSing) {
+            modelSing = folders.map { $0.appendingPathComponent("stemgenrt-hop128.onnx").path }.first(where: usable) ?? ""
+            UserDefaults.standard.set(modelSing, forKey: "modelSing")
         }
         if !usable(modelFour) {
             modelFour = folders.map { $0.appendingPathComponent("htdemucs.onnx").path }.first(where: usable) ?? ""
@@ -390,9 +413,8 @@ struct PracticeView: View {
         GroupBox("Models") {
             VStack(alignment:.leading,spacing:8) {
                 Button { m.modelPicker(six:true) } label: { modelLabel("6-stem",path:m.modelSix) }.buttonStyle(.plain)
-                Button { m.modelPicker(six:false) } label: { modelLabel("4-stem",path:m.modelFour) }.buttonStyle(.plain)
-                if !m.modelSix.isEmpty || !m.modelFour.isEmpty { Text("Model selected · loads when separation begins").font(.caption).foregroundStyle(.secondary) }
-                Text("ONNX preferred; BIN also supported").font(.caption).foregroundStyle(.secondary)
+                Button { m.singModelPicker() } label: { modelLabel("Sing · StemGenRT",path:m.modelSing) }.buttonStyle(.plain).help("Choose StemGenRT hop-128 ONNX model")
+                Text("Live Sing streams vocals and accompaniment; separation may leave some vocals.").font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth:.infinity,alignment:.leading)
         }
         Spacer()
@@ -447,17 +469,25 @@ struct LiveSingControls: View {
     var body: some View { VStack(alignment:.leading,spacing:12) {
         HStack { Label("Live Sing",systemImage:"mic.fill").font(.headline); Spacer(); Text(stateLabel).font(.caption).foregroundStyle(.secondary) }
         if m.status.sing == 0 {
-            Text(m.capturing ? "Play audio in \(m.capturedSourceName), then click Start Sing." : "Choose a source and click Start Capture in the main window before starting Sing.").font(.caption).foregroundStyle(.secondary)
+            if m.status.sing_model_ready == 0 {
+                Text("Choose the StemGenRT hop-128 ONNX model to enable Live Sing.").font(.caption).foregroundStyle(.secondary)
+                Button("Choose Sing Model…") { m.singModelPicker() }
+            } else {
+                Text(m.capturing ? "Play audio in \(m.capturedSourceName), then click Start Sing." : "Choose a source and click Start Capture in the main window before starting Sing.").font(.caption).foregroundStyle(.secondary)
+            }
         } else {
             Text("Source: \(m.capturedSourceName)").font(.subheadline)
+            if m.lowPowerMode {
+                Text("Low Power Mode can make live separation fall behind.").font(.caption).foregroundStyle(.secondary)
+            }
             if m.status.sing_state == 1 || m.status.sing_state == 2 {
-                HStack { Text(stateLabel); Spacer(); Text(String(format:"%.1f s buffered",m.status.sing_buffered)) }.font(.caption).foregroundStyle(.secondary)
-                ProgressView(value:min(1,max(0,m.status.sing_buffered / 6)))
-            } else if m.status.sing_state == 3 {
-                Label(String(format:"Audio latency · %.1f s",m.status.sing_latency),systemImage:"clock").font(.caption).foregroundStyle(.secondary)
-                Text(String(format:"%.1f s played",m.status.sing_position)).font(.system(.caption,design:.monospaced)).foregroundStyle(.secondary)
+                HStack { ProgressView().controlSize(.small); Text(stateLabel); Spacer(); Text(String(format:"%.0f ms buffered",m.status.sing_buffered * 1000)) }.font(.caption).foregroundStyle(.secondary)
             } else if m.status.sing_state == 4 {
-                Text("Play audio in \(m.capturedSourceName) to continue.").font(.caption).foregroundStyle(.secondary)
+                HStack { ProgressView().controlSize(.small); Text("Waiting for audio from \(m.capturedSourceName)…") }.font(.caption).foregroundStyle(.secondary)
+            } else if m.status.sing_state == 3 {
+                Label(String(format:"Processing estimate · %.0f ms",m.status.sing_latency * 1000),systemImage:"clock").font(.caption).foregroundStyle(.secondary)
+                Text("Transpose can add a little extra delay.").font(.caption).foregroundStyle(.secondary)
+                Text(String(format:"%.1f s played",m.status.sing_position)).font(.system(.caption,design:.monospaced)).foregroundStyle(.secondary)
             }
         }
         GroupBox("Vocal reduction · \(Int(m.status.vocal_removal * 100))%") {
@@ -468,14 +498,12 @@ struct LiveSingControls: View {
             Text(String(format:"%+.0f semitones",Double(m.status.sing_pitch))).font(.system(.body,design:.monospaced))
             Button("+") { ws_sing_pitch(m.ws,min(6,m.status.sing_pitch+1)); m.poll() }.disabled(m.status.sing == 0 || m.status.sing_pitch >= 6)
         }.frame(maxWidth:.infinity) }
-        GroupBox("Separation") { HStack { Text("Automatic"); Spacer(); Text(qualityName).foregroundStyle(.secondary) } }
-        if m.status.quality == 2 {
-            Text("Center fallback reduces centered sound, including centered instruments and mono audio; it cannot isolate vocals.").font(.caption).foregroundStyle(.secondary)
-        }
+        GroupBox("Separation") { HStack { Text("Model"); Spacer(); Text(qualityName).foregroundStyle(.secondary) } }
+        Text("Streaming separation may leave some vocals.").font(.caption).foregroundStyle(.secondary)
         Text("To skip or pause live audio, use the source app. Use the clip for looping and individual stem controls.").font(.caption).foregroundStyle(.secondary)
-        HStack { Button(m.status.sing == 0 ? "Start Sing" : "Stop Sing") { m.toggleSing() }.buttonStyle(.borderedProminent).disabled(m.status.sing == 0 && !m.capturing); Spacer(); if showsReturnToClip { Button("Return to Clip") { ws_play(m.ws,1); m.poll() }.disabled(m.status.duration < 0.1) } }
+        HStack { Button(m.status.sing == 0 ? "Start Sing" : "Stop Sing") { m.toggleSing() }.buttonStyle(.borderedProminent).disabled(m.status.sing == 0 && (!m.capturing || m.status.sing_model_ready == 0)); Spacer(); if showsReturnToClip { Button("Return to Clip") { ws_play(m.ws,1); m.poll() }.disabled(m.status.duration < 0.1) } }
     }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:10)) }
-    var qualityName:String { if m.status.sing == 0 { return "Stopped" }; switch m.status.quality { case 0:return "6-stem"; case 1:return "4-stem"; case 2:return "Center fallback"; default:return "Automatic" } }
+    var qualityName:String { m.status.sing == 0 ? "Stopped" : "StemGenRT" }
 }
 
 private struct FloatingLevelAccessor: NSViewRepresentable {

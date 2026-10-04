@@ -5,4 +5,5 @@
 .DS_Store
 *.dSYM/
 *.bin
+!/tests/fixtures/streaming.bin
 *.wav

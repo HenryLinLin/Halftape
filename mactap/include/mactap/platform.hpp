@@ -23,7 +23,7 @@ class Output {
 public:
     Output();
     ~Output();
-    void start(Render render, void* context);
+    void start(Render render, void* context, bool live = false);
     void stop();
 };
 }

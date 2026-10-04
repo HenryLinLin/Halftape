@@ -29,7 +29,8 @@ class Session {
     std::unique_ptr<Sing> sing;
     Jobs jobs;
     uint32_t source = 0;
-    std::string sourceName, sourceBundle, sixPath, fourPath;
+    std::string sourceName, sourceBundle, sixPath, fourPath, singPath;
+    bool singModelReady = false;
     uint64_t nextID = 1;
     bool pauseSource = false, counting = false, outputStarted = false;
     double gridOffset = 0;
@@ -66,6 +67,7 @@ public:
     int histories(WSHistory*, int);
     void select(uint64_t);
     void model(const char*, const char*);
+    void singModel(const char*);
     void setSing(bool);
     void vocals(float);
     void singPitch(float);

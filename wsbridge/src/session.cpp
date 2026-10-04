@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <unistd.h>
+#include <pthread.h>
 namespace ws {
 template<size_t N> static void text(char (&out)[N], const std::string& value) { std::snprintf(out, N, "%s", value.c_str()); }
 static double sane(double x, double lo, double hi) { return std::clamp(std::isfinite(x) ? x : lo, lo, hi); }
@@ -22,7 +23,7 @@ void Session::startOutput() {
     output.start([](void* context, float* l, float* r, unsigned n) noexcept {
         auto& self = *static_cast<Session*>(context);
         if (self.sing) self.sing->render(l, r, n); else self.engine.render(l, r, n);
-    }, this);
+    }, this, bool(sing));
     outputStarted = true;
 }
 int Session::sources(WSSource* out, int capacity) {
@@ -129,7 +130,12 @@ void Session::demo() {
     startOutput(); submitClip(std::move(audio), rate, "Demo · A minor / 120 BPM");
 }
 void Session::status(WSStatus* s) {
+    if (sing && sing->state() == 5) {
+        auto reason = sing->error(); stopCapture();
+        error(("Sing stopped and the source is audible again: " + reason).c_str());
+    }
     *s = {}; s->key = -1;
+    s->sing_model_ready = singModelReady;
     s->buffered = capture ? capture->buffered() : 0;
     s->capturing = capture && !captureStop.load();
     s->capture_source = source;
@@ -140,7 +146,7 @@ void Session::status(WSStatus* s) {
     s->looping = engine.looping.load();
     s->speed = engine.speed.load(); s->pitch = engine.pitch.load();
     s->sing = bool(sing); s->quality = sing ? sing->quality.load() : 0;
-    s->sing_latency = sing ? sing->delay() : 0; s->vocal_removal = sing ? sing->removal.load() : .7f;
+    s->sing_latency = sing ? sing->delay() : 0; s->vocal_removal = sing ? sing->removal.load() : 1;
     if (sing) {
         s->sing_state = sing->state(); s->sing_buffered = sing->buffered();
         s->sing_position = sing->position(); s->sing_pitch = sing->pitch.load();
@@ -269,27 +275,37 @@ void Session::setSing(bool enabled) {
         return;
     }
     if (!source || captureStop.load()) throw std::runtime_error("Click Start Capture before starting Sing.");
+    if (!singModelReady) throw std::runtime_error("Choose the streaming Sing model first. Download it with scripts/sing-model.sh.");
+    auto sampleRate = capture->sample_rate();
+    auto nextSing = std::make_unique<Sing>(sampleRate, singPath);
     ++generation; busy.store(false);
-    if (enabled) jobs.submit([this] { separator.unload(); loadedModel.clear(); }, true);
+    jobs.submit([this] { separator.unload(); loadedModel.clear(); }, true);
     auto id = source; auto name = sourceName; auto bundle = sourceBundle;
     disarm(); output.stop(); outputStarted = false;
     try {
         double sr = tap.start(id, true);
+        if (unsigned(sr) != sampleRate) throw std::runtime_error("The source audio format changed. Start Capture again before starting Sing.");
         capture = std::make_unique<CaptureStore>(unsigned(sr));
-        sing = std::make_unique<Sing>(unsigned(sr), sixPath, fourPath);
+        sing = std::move(nextSing);
         source = id; sourceName = name; sourceBundle = bundle;
         startOutput(); captureStop.store(false); engine.playing.store(false);
         captureThread = std::thread([this] {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
             std::array<Frame, 2048> frames;
             while (!captureStop.load()) {
                 size_t n = 0; while (n < frames.size() && tap.queue.pop(frames[n])) ++n;
                 if (n) { capture->append(frames.data(), n); for (size_t i = 0; i < n; ++i) sing->feed(frames[i]); }
-                else std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                else std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         });
-        error("Sing is delayed by its processing buffer. Lyrics in the source app will run early.");
+        error("Sing is processing live audio. Keep the source playing.");
     } catch (...) { disarm(); throw; }
 }
 void Session::vocals(float amount) { if (sing) sing->removal.store(sane(amount, 0, 1)); }
 void Session::singPitch(float value) { if (sing) sing->pitch.store(sane(value, -6, 6)); }
+void Session::singModel(const char* path) {
+    singPath = path ? path : "";
+    std::error_code error;
+    singModelReady = !singPath.empty() && std::filesystem::is_regular_file(singPath, error);
+}
 }

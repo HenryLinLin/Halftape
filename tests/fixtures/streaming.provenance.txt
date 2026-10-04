@@ -1,0 +1,3 @@
+Independent synthetic parity fixture from StemgenRT revision 61df8f4aa1555ef110308d01ea92b54ace770979.
+Source: https://github.com/sweetspotsoundsystem/stemgen-rt/tree/61df8f4aa1555ef110308d01ea92b54ace770979/test/fixtures/cropped1024-pytorch.bin
+SHA-256: 02d7934fb50934c10e33be67ad53d117904bc025365fcb40f464d1d6476a027d

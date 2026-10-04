@@ -69,6 +69,9 @@ void ws_select(WS* h, uint64_t id) { invoke(h, [&](ws::Session& s) { s.select(id
 void ws_set_model(WS* h, const char* sixPath, const char* fourPath) {
     invoke(h, [&](ws::Session& s) { s.model(sixPath, fourPath); });
 }
+void ws_set_sing_model(WS* h, const char* path) {
+    invoke(h, [&](ws::Session& s) { s.singModel(path); });
+}
 void ws_sing(WS* h, int enabled) { invoke(h, [&](ws::Session& s) { s.setSing(enabled != 0); }); }
 void ws_vocals(WS* h, float removal) { invoke(h, [&](ws::Session& s) { s.vocals(removal); }); }
 void ws_pause_source(WS* h, int enabled) { invoke(h, [&](ws::Session& s) { s.setPause(enabled != 0); }); }

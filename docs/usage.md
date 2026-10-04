@@ -8,9 +8,11 @@ In Practice, use **Play** and **Loop** to play a clip. Drag A and B on the timel
 
 ## Live Sing
 
-Start capture, then press Control–Option–K to start Sing. Keep the source playing: Halftape mutes its original output and plays delayed processed audio. Sing buffers six seconds of audio before processing.
+Start capture, open **Live Sing**, then click **Start Sing**. Sing uses StemGenRT for live vocal separation. The model is available through `scripts/sing-model.sh`, or **Choose Sing Model** can open an existing `stemgenrt-hop128.onnx`.
 
-Sing can switch from six-stem separation to four stems or center cancellation when processing falls behind. Center cancellation can also remove centered instruments and leave vocals audible. **Stop Sing** restores the original audio.
+Keep the source playing: Halftape mutes its original output and plays the processed audio. Pause and seek in the source app. **Stop Sing** restores the original audio and stops capture. **Return to Clip** also resumes your practice clip.
+
+Vocals can remain even at 100% reduction. Transpose adds delay, and the processing estimate excludes device and Bluetooth latency. Low Power Mode can make Sing fall behind.
 
 ## Models and saved clips
 

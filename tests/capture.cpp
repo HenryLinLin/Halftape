@@ -3,12 +3,17 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
 
 extern int mock_tap_starts;
 extern int mock_output_active;
+extern bool mock_emit_nonfinite_for_muted_tap;
+extern bool mock_tap_muted;
+extern bool mock_tap_active;
 void mock_render(float* left, float* right, unsigned frames);
 
 namespace {
@@ -30,7 +35,7 @@ WSStatus waitForClip(WS* h, uint64_t previous = 0) {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
         unsetenv("HALFTAPE_HEADLESS");
         WS* h = ws_create();
@@ -53,6 +58,38 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         double captured = status(h).buffered;
         require(captured > .95, "mock tone did not reach the capture buffer");
+
+        // A missing model must preserve the existing unmuted capture.
+        const int startsBeforeMissingModel = mock_tap_starts;
+        ws_sing(h, 1);
+        s = status(h);
+        require(!s.sing && s.capturing && s.capture_source == 42 &&
+                    std::strcmp(s.capture_name, "Mock Source A") == 0,
+                "Sing without a model must preserve the active capture source");
+        require(mock_tap_starts == startsBeforeMissingModel,
+                "Sing without a model must not start or replace the capture tap");
+
+        const bool haveSingModel = argc > 1 && std::filesystem::is_regular_file(argv[1]);
+        if (haveSingModel) {
+            const auto invalidModel = std::filesystem::temp_directory_path() /
+                ("halftape-invalid-sing-" + std::to_string(
+                    std::chrono::steady_clock::now().time_since_epoch().count()) + ".onnx");
+            {
+                std::ofstream file(invalidModel, std::ios::binary);
+                file << "not a streaming model";
+            }
+            ws_set_sing_model(h, invalidModel.c_str());
+            const int startsBeforeInvalidModel = mock_tap_starts;
+            ws_sing(h, 1);
+            s = status(h);
+            require(!s.sing && s.capturing && s.capture_source == 42 &&
+                        std::strcmp(s.capture_name, "Mock Source A") == 0,
+                    "Sing with invalid model weights must preserve the active capture source");
+            require(mock_tap_starts == startsBeforeInvalidModel,
+                    "Sing with invalid model weights must not replace the active capture tap");
+            std::filesystem::remove(invalidModel);
+            ws_set_sing_model(h, argv[1]);
+        }
 
         ws_stop_capture(h);
         s = status(h);
@@ -107,39 +144,62 @@ int main() {
         require(s.buffered >= .49 && s.buffered <= .51, "source 43 should provide a fresh half-second buffer");
         require(mock_tap_starts == 2, "rearm did not start exactly one new capture");
 
-        ws_sing(h, 1);
-        s = status(h);
-        require(s.sing && s.capturing && s.capture_source == 43, "Sing did not start from active capture");
-        require(mock_tap_starts == 3, "Sing should start exactly one muted capture");
-        ws_sing(h, 0);
-        s = status(h);
-        require(!s.sing && !s.capturing && s.capture_source == 43, "stopping Sing should stop capture and retain source");
-        const double singStoppedBuffer = s.buffered;
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
-        s = status(h);
-        require(std::abs(s.buffered - singStoppedBuffer) < .02, "stopped Sing capture continued growing");
-        require(mock_tap_starts == 3, "stopping Sing silently rearmed capture");
+        if (haveSingModel) {
+            ws_sing(h, 1);
+            s = status(h);
+            require(s.sing && s.capturing && s.capture_source == 43, "Sing did not start from active capture");
+            require(mock_tap_starts == 3, "Sing should start exactly one muted capture");
+            ws_sing(h, 0);
+            s = status(h);
+            require(!s.sing && !s.capturing && s.capture_source == 43, "stopping Sing should stop capture and retain source");
+            const double singStoppedBuffer = s.buffered;
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            s = status(h);
+            require(std::abs(s.buffered - singStoppedBuffer) < .02, "stopped Sing capture continued growing");
+            require(mock_tap_starts == 3, "stopping Sing silently rearmed capture");
 
-        ws_seek(h, .1);
-        require(ws_arm(h, 43) == 1, "could not rearm source for Sing return test");
-        const int startsBeforeActiveSing = mock_tap_starts;
-        ws_sing(h, 1);
-        s = status(h);
-        require(s.sing && s.capturing && mock_tap_starts == startsBeforeActiveSing + 1,
-                "second Sing session did not start from active capture");
-        ws_play(h, 1);
-        std::memset(left, 0, sizeof(left));
-        std::memset(right, 0, sizeof(right));
-        double beforeReturn = status(h).position;
-        for (int i = 0; i < 24; ++i) mock_render(left, right, 512);
-        energy = 0;
-        for (int i = 0; i < 512; ++i) energy += std::abs(left[i]) + std::abs(right[i]);
-        s = status(h);
-        require(!s.sing && !s.capturing && s.position > beforeReturn && energy > 1.0,
-                "play during Sing did not return to audible prior clip playback");
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
-        require(mock_tap_starts == startsBeforeActiveSing + 1 && !status(h).capturing,
-                "play after Sing returned silently rearmed capture");
+            ws_seek(h, .1);
+            require(ws_arm(h, 43) == 1, "could not rearm source for Sing return test");
+            const int startsBeforeActiveSing = mock_tap_starts;
+            ws_sing(h, 1);
+            s = status(h);
+            require(s.sing && s.capturing && mock_tap_starts == startsBeforeActiveSing + 1,
+                    "second Sing session did not start from active capture");
+            ws_play(h, 1);
+            std::memset(left, 0, sizeof(left));
+            std::memset(right, 0, sizeof(right));
+            double beforeReturn = status(h).position;
+            for (int i = 0; i < 24; ++i) mock_render(left, right, 512);
+            energy = 0;
+            for (int i = 0; i < 512; ++i) energy += std::abs(left[i]) + std::abs(right[i]);
+            s = status(h);
+            require(!s.sing && !s.capturing && s.position > beforeReturn && energy > 1.0,
+                    "play during Sing did not return to audible prior clip playback");
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            require(mock_tap_starts == startsBeforeActiveSing + 1 && !status(h).capturing,
+                    "play after Sing returned silently rearmed capture");
+
+            require(ws_arm(h, 43) == 1, "could not arm source for Sing worker failure test");
+            mock_emit_nonfinite_for_muted_tap = true;
+            const int startsBeforeWorkerFailure = mock_tap_starts;
+            ws_sing(h, 1);
+            mock_emit_nonfinite_for_muted_tap = false;
+            require(mock_tap_starts == startsBeforeWorkerFailure + 1 && mock_tap_muted && mock_tap_active,
+                    "Sing worker failure input was not emitted by a muted tap");
+            for (int i = 0; i < 1000; ++i) {
+                s = status(h);
+                if (!s.sing && !s.capturing) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            require(!s.sing && !s.capturing && s.capture_source == 43,
+                    "Sing worker error did not stop the failed capture and retain its source");
+            require(!mock_tap_active && !mock_tap_muted,
+                    "Sing worker error left the muted tap running");
+            require(std::strstr(s.message, "source is audible again") != nullptr,
+                    "Sing worker error did not explain that the source is audible again");
+        } else {
+            std::cout << "Sing model unavailable; skipping live Sing lifecycle checks\n";
+        }
 
         ws_disarm(h);
         s = status(h);
