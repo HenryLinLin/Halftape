@@ -40,6 +40,7 @@ int ws_sources(WS* h, WSSource* out, int capacity) {
 }
 int ws_arm(WS* h, uint32_t source) { return invokeInt(h, [&](ws::Session& s) { return s.arm(source); }); }
 void ws_disarm(WS* h) { invoke(h, [](ws::Session& s) { s.disarm(); }); }
+void ws_stop_capture(WS* h) { invoke(h, [](ws::Session& s) { s.stopCapture(); }); }
 void ws_grab(WS* h, double seconds) { invoke(h, [&](ws::Session& s) { s.grab(seconds); }); }
 void ws_demo(WS* h) { invoke(h, [](ws::Session& s) { s.demo(); }); }
 void ws_status(WS* h, WSStatus* out) { invoke(h, [&](ws::Session& s) { if (out) s.status(out); }); }

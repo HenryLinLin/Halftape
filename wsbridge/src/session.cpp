@@ -30,11 +30,16 @@ int Session::sources(WSSource* out, int capacity) {
     for (int i = 0; i < count; ++i) { out[i] = {}; out[i].id = list[i].id; out[i].active = list[i].active; text(out[i].name, list[i].name); text(out[i].bundle, list[i].bundle); }
     return count;
 }
-void Session::disarm() {
+void Session::stopCapture() {
     captureStop.store(true); if (captureThread.joinable()) captureThread.join();
     tap.stop();
     if (sing) { output.stop(); outputStarted = false; sing.reset(); }
+    if (capture) error("Capture stopped. The buffered audio is still available to grab.");
+}
+void Session::disarm() {
+    stopCapture();
     capture.reset(); source = 0;
+    sourceName.clear(); sourceBundle.clear();
 }
 int Session::arm(uint32_t id) {
     disarm();
@@ -53,7 +58,7 @@ int Session::arm(uint32_t id) {
             else std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     });
-    error(("Buffering " + sourceName).c_str());
+    error(("Capturing " + sourceName + ". Grab saves the most recent audio as a practice clip.").c_str());
     return 1;
 }
 void Session::activate(const Item& item) {
@@ -87,7 +92,7 @@ void Session::submitClip(Stereo audio, unsigned sampleRate, std::string title) {
                     std::error_code ec; std::filesystem::remove(tempDir / (std::to_string(history.back().clip->id) + ".pcm"), ec); history.pop_back();
                 }
                 activate(item);
-                message = path.empty() ? "Original audio ready. Choose a six-stem model in Settings to separate it." : "Separating the loop first…";
+                message = path.empty() ? "Playing the original mix. Choose a separation model to enable vocal removal." : "Separating stems. Unfinished regions play the original mix.";
             }
             separate(item, ticket, path);
         } catch (const std::exception& e) { if (ticket == generation.load()) error(e.what()); }
@@ -105,7 +110,7 @@ void Session::separate(Item item, uint64_t ticket, std::string path) {
 }
 void Session::grab(double seconds) {
     if (sing) setSing(false);
-    if (!capture) throw std::runtime_error("Arm an audio app before grabbing.");
+    if (!capture || capture->buffered() < .1) throw std::runtime_error("Click Start Capture and play audio in the source before grabbing a clip.");
     auto audio = capture->grab(sane(seconds, 1, 180));
     startOutput(); submitClip(std::move(audio), capture->sample_rate(), "Grabbed from " + sourceName);
     if (pauseSource) pauseSourceApp(sourceBundle);
@@ -124,6 +129,9 @@ void Session::demo() {
 void Session::status(WSStatus* s) {
     *s = {}; s->key = -1;
     s->buffered = capture ? capture->buffered() : 0;
+    s->capturing = capture && !captureStop.load();
+    s->capture_source = source;
+    text(s->capture_name, sourceName);
     s->busy = busy.load(); s->progress = progress.load();
     s->capture_drops = tap.dropped.load();
     s->position = engine.playhead.load(); s->playing = engine.playing.load(); s->loops = engine.loops.load();
@@ -134,7 +142,7 @@ void Session::status(WSStatus* s) {
     auto range = engine.loop.load(); s->loop_a = double(range >> 32) / rate; s->loop_b = double(uint32_t(range)) / rate;
     std::lock_guard lock(mutex);
     engine.collect(); s->history_count = int(history.size()); text(s->message, message);
-    if (active.clip) { s->duration = active.clip->seconds(); s->bpm = active.clip->bpm; s->key = active.clip->key; s->clip_id = active.clip->id; }
+    if (active.clip) { s->duration = active.clip->seconds(); s->bpm = active.clip->bpm; s->key = active.clip->key; s->clip_id = active.clip->id; s->stems_ready = active.stems && active.stems->ready.load() > 0; }
 }
 void Session::play(bool value) { if (value) { startOutput(); if (counting) engine.countRequested.store(true); } engine.playing.store(value); }
 void Session::speed(float value) { engine.speed.store(sane(value, .25, 1.5)); }
@@ -207,12 +215,16 @@ void Session::model(const char* six, const char* four) {
 }
 void Session::setSing(bool enabled) {
     if (enabled == bool(sing)) return;
-    if (!source) throw std::runtime_error("Arm an audio app before starting Sing.");
+    if (!enabled) {
+        stopCapture(); startOutput();
+        error("Sing and capture stopped. The source is audible again.");
+        return;
+    }
+    if (!source || captureStop.load()) throw std::runtime_error("Click Start Capture before starting Sing.");
     ++generation; busy.store(false);
     if (enabled) jobs.submit([this] { separator.unload(); loadedModel.clear(); }, true);
     auto id = source; auto name = sourceName; auto bundle = sourceBundle;
     disarm(); output.stop(); outputStarted = false;
-    if (!enabled) { arm(id); startOutput(); error("Sing stopped. The source is audible again."); return; }
     try {
         double sr = tap.start(id, true);
         capture = std::make_unique<CaptureStore>(unsigned(sr));

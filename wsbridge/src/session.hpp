@@ -19,7 +19,7 @@ class Session {
     std::mutex mutex;
     std::deque<Item> history;
     Item active;
-    std::string message = "Choose an audio app to start buffering.";
+    std::string message = "Choose an audio source, then click Start Capture.";
     std::unique_ptr<CaptureStore> capture;
     std::thread captureThread;
     std::atomic<bool> captureStop{true};
@@ -46,6 +46,7 @@ public:
     void error(const char* text);
     int sources(WSSource*, int);
     int arm(uint32_t);
+    void stopCapture();
     void disarm();
     void grab(double);
     void demo();

@@ -1,14 +1,14 @@
 # Using Halftape
 
-Play audio in another app, then choose it as the source in Halftape. Selecting a source starts capture. Allow system audio recording when macOS asks. The buffer keeps the last three minutes; **Grab** turns the selected duration into a practice clip. **Disarm source** stops capture and clears the buffer.
+Play audio in the source app, choose it in **Capture**, then click **Start Capture**. Allow system audio recording when macOS asks. Halftape keeps a rolling buffer of the last three minutes. Click **Grab last 30s** to make a practice clip; the button shows the available time if there is less. **Stop Capture** keeps the buffer, while a new capture replaces it. **Demo** plays a sample clip without recording.
 
-Pause the source before playing a clip, or enable **Pause source on Grab**. Control–Option–G grabs recent audio.
+You can pause the source app before playing a clip, or turn on **Pause source on Grab**. Control–Option–G grabs from an available buffer. It does not start capture.
 
 In Practice, drag A and B to set the loop. Space plays or pauses the clip. Use the stem controls to solo or mute separated parts; unfinished regions play the original mix. The speed and pitch controls support slower practice and transposition.
 
 ## Live Sing
 
-Control–Option–K starts Sing for the selected source. Keep the source playing: Halftape mutes its original output and plays delayed processed audio. Sing buffers six seconds of audio before processing.
+Start capture, then press Control–Option–K to start Sing. Keep the source playing: Halftape mutes its original output and plays delayed processed audio. Sing buffers six seconds of audio before processing.
 
 Sing can switch from six-stem separation to four stems or center cancellation when processing falls behind. Center cancellation can also remove centered instruments and leave vocals audible. **Stop Sing** restores the original audio.
 

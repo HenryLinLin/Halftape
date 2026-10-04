@@ -12,6 +12,9 @@ typedef struct {
     int playing, busy, sing, quality, key, history_count;
     uint64_t clip_id, loops, capture_drops, underruns;
     char message[512];
+    int capturing, stems_ready;
+    uint32_t capture_source;
+    char capture_name[128];
 } WSStatus;
 typedef struct { uint64_t id; double duration; char title[160]; } WSHistory;
 WS* ws_create(void);
@@ -19,6 +22,7 @@ void ws_destroy(WS*);
 int ws_sources(WS*, WSSource* out, int capacity);
 int ws_arm(WS*, uint32_t source);
 void ws_disarm(WS*);
+void ws_stop_capture(WS*);
 void ws_grab(WS*, double seconds);
 void ws_demo(WS*);
 void ws_status(WS*, WSStatus*);
