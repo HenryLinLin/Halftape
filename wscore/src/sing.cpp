@@ -21,7 +21,9 @@ void Sing::run(std::string six, std::string four) {
             expected = f.position + 1;
             chunk[0].push_back(f.audio.l); chunk[1].push_back(f.audio.r);
         }
+        bufferedFrames.store(chunk[0].size());
         if (chunk[0].size() < window) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+        processing.store(true);
         auto start = std::chrono::steady_clock::now();
         auto audio = resample(chunk, sourceRate);
         auto level = quality.load();
@@ -36,6 +38,7 @@ void Sing::run(std::string six, std::string four) {
             if (quit.load()) return;
             level = level == 0 && !four.empty() ? 1 : 2; quality.store(level);
             separator.unload(); loaded = -1;
+            processing.store(false);
             continue;
         }
         std::vector<SingFrame> result(audio[0].size());
@@ -56,6 +59,7 @@ void Sing::run(std::string six, std::string four) {
         for (size_t i = 0; i < publish && !quit.load(); ++i) {
             while (!ready.push(result[i]) && !quit.load()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+        processing.store(false);
         rtf.store(compute / 5);
         latency.store(6 + compute + double(input.size()) / sourceRate);
         if ((compute / 5 > .8 || input.size() > sourceRate * 7 || dropped.load() != seenDrops) && level < 2) {
@@ -69,7 +73,8 @@ void Sing::run(std::string six, std::string four) {
 }
 void Sing::render(float* left, float* right, unsigned count) noexcept WS_REALTIME {
     std::fill_n(left, count, 0); std::fill_n(right, count, 0);
-    if (!primed) { if (ready.size() < rate / 2) return; primed = true; }
+    if (!primed) { if (ready.size() < rate / 2) { outputReady.store(false); return; } primed = true; }
+    outputReady.store(true);
     stretch.setTransposeSemitones(std::clamp(pitch.load(), -6.f, 6.f));
     for (unsigned offset = 0; offset < count;) {
         unsigned n = std::min(256u, count - offset);
@@ -80,7 +85,7 @@ void Sing::render(float* left, float* right, unsigned count) noexcept WS_REALTIM
         float amount = std::clamp(removal.load(), 0.f, 1.f);
         for (unsigned i = 0; i < need; ++i) {
             SingFrame f{};
-            if (!ready.pop(f)) { underruns.fetch_add(1, std::memory_order_relaxed); primed = false; }
+            if (!ready.pop(f)) { underruns.fetch_add(1, std::memory_order_relaxed); primed = false; outputReady.store(false); }
             else consumed.store(f.position, std::memory_order_relaxed);
             mixed[0][i] = f.l - amount * f.vl; mixed[1][i] = f.r - amount * f.vr;
         }

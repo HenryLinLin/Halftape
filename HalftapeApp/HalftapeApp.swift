@@ -11,8 +11,8 @@ struct HalftapeApp: App {
             .defaultSize(width: 1120, height: 780)
         MenuBarExtra("\(model.capturing ? "Capturing" : "Halftape") · \(Int(model.status.buffered))s", systemImage: "waveform") { MenuContent().environmentObject(model) }
             .menuBarExtraStyle(.window)
-        Window("Sing", id: "sing") { SingPanel().environmentObject(model).frame(width: 360, height: 310) }
-            .defaultSize(width: 360, height: 310)
+        Window("Sing", id: "sing") { SingPanel().environmentObject(model).frame(minWidth: 400, minHeight: 460) }
+            .defaultSize(width: 400, height: 460)
     }
 }
 
@@ -50,7 +50,7 @@ private func cString<T>(_ bytes: T) -> String {
     @Published var snap = true
     @Published var paused = false
     @Published var trainer = false
-    @Published var countIn = true
+    @Published var countIn = false
     @Published var chooser = false
     @Published var grabSeconds = 30.0
     @Published var heldGrab = false
@@ -105,6 +105,7 @@ private func cString<T>(_ bytes: T) -> String {
         sources = Array(rows.prefix(max(0, Int(n))))
         if sourceId == 0 { sourceId = sources.first(where: { $0.active != 0 })?.id ?? 0 }
     }
+    var isSinging: Bool { status.sing != 0 }
     func poll() {
         guard !closed else { return }
         ws_status(ws, &status)
@@ -117,7 +118,7 @@ private func cString<T>(_ bytes: T) -> String {
     }
     func arm() { guard !capturing, sourceId != 0 else { return }; ws_arm(ws, sourceId); poll() }
     func stopCapture() { guard capturing else { return }; ws_stop_capture(ws); poll() }
-    func updateStem(_ index:Int) { guard status.stems_ready > 0 else { return }; ws_stem(ws, Int32(index), Float(gains[index]), mutes[index] ? 1:0, solos[index] ? 1:0) }
+    func updateStem(_ index:Int) { guard status.stems_ready > 0, !isSinging else { return }; ws_stem(ws, Int32(index), Float(gains[index]), mutes[index] ? 1:0, solos[index] ? 1:0) }
     func toggleSing() { guard capturing || status.sing != 0 else { return }; ws_sing(ws, status.sing == 0 ? 1 : 0); poll() }
     func grab(_ seconds: Double? = nil) {
         guard canGrab else { return }
@@ -127,10 +128,12 @@ private func cString<T>(_ bytes: T) -> String {
         guard next >= 0.1 else { return }
         lastGrabDate = now; lastGrabRequest = requested; ws_grab(ws, next); poll(); chooser = false
     }
-    func togglePlay() { guard status.duration >= 0.1 else { return }; ws_play(ws, status.playing == 0 ? 1 : 0) }
-    func setSpeed(_ value: Double) { ws_speed(ws, Float(min(1.5, max(0.25, value)))) }
-    func setPitch(_ value: Double) { ws_pitch(ws, Float(min(13, max(-13, value)))) }
-    func loopA(_ a: Double, _ b: Double) { ws_loop(ws, a, b, snap ? 1 : 0) }
+    func togglePlay() { guard status.duration >= 0.1 else { return }; if isSinging { ws_play(ws, 1) } else { ws_play(ws, status.playing == 0 ? 1 : 0) }; poll() }
+    func seek(_ value: Double) { guard !isSinging else { return }; ws_seek(ws, max(0, min(status.duration, value))); poll() }
+    func setSpeed(_ value: Double) { guard !isSinging else { return }; ws_speed(ws, Float(min(1.5, max(0.25, value)))) }
+    func setPitch(_ value: Double) { guard !isSinging else { return }; ws_pitch(ws, Float(min(13, max(-13, value)))) }
+    func loopA(_ a: Double, _ b: Double) { guard !isSinging else { return }; ws_loop(ws, a, b, snap ? 1 : 0) }
+    func loopEnabled(_ enabled: Bool) { ws_loop_enabled(ws, enabled ? 1 : 0); poll() }
     func modelPicker(six: Bool) {
         let p = NSOpenPanel()
         p.allowedContentTypes = [UTType(filenameExtension: "onnx") ?? .data, UTType(filenameExtension: "bin") ?? .data]
@@ -217,11 +220,12 @@ struct MenuContent: View {
             HStack { Text("Halftape").font(.headline); Spacer(); Circle().fill(m.capturing ? .green : .secondary).frame(width: 8,height: 8) }
             Text(m.captureLabel).font(.caption).foregroundStyle(.secondary)
             Text(cString(m.status.message)).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-            HStack { Button { m.revealPractice(); m.grab() } label: { Label(m.grabLabel, systemImage: "arrow.down.to.line") }.disabled(!m.canGrab); Button { m.togglePlay() } label: { Label(m.status.playing == 0 ? "Play" : "Pause", systemImage: m.status.playing == 0 ? "play.fill" : "pause.fill") }.disabled(m.status.duration < 0.1) }
+            HStack { Button { m.revealPractice(); m.grab() } label: { Label(m.grabLabel, systemImage: "arrow.down.to.line") }.disabled(!m.canGrab); Button { m.togglePlay() } label: { Label(m.isSinging ? "Play Clip" : (m.status.playing == 0 ? "Play Clip" : "Pause"), systemImage: m.status.playing == 0 ? "play.fill" : "pause.fill") }.disabled(m.status.duration < 0.1) }
             Picker("Source",selection:$m.sourceId) { ForEach(m.sources,id:\.id) { source in Text(cString(source.name)).tag(source.id) } }.disabled(m.capturing)
             Button("Refresh sources") { m.refreshSources() }
             Button(m.capturing ? "Stop Capture" : "Start Capture") { m.capturing ? m.stopCapture() : m.arm() }.disabled(!m.capturing && m.sourceId == 0).help(m.capturing ? "Stop capture and keep the captured audio available" : "Start capture and replace the current capture buffer")
             Button("Open Practice") { m.revealPractice() }
+            Button("Live Sing…") { m.revealSing() }
             Divider(); Text("Recent practice").font(.caption.bold())
             ForEach(Array(m.history.enumerated()), id: \.offset) { _, h in Button(cString(h.title)) { ws_select(m.ws, h.id) }.buttonStyle(.plain) }
             Button("Quit Halftape") { NSApp.terminate(nil) }
@@ -248,17 +252,21 @@ struct PracticeView: View {
     let names = ["Vocals", "Drums", "Bass", "Guitar", "Piano", "Other"]
     var body: some View {
         VStack(spacing: 0) {
-            HStack { Text(cString(m.status.message)).font(.caption).foregroundStyle(.secondary).lineLimit(1); Spacer() }.padding(.horizontal,20).padding(.top,8)
+            HStack { Text(m.isSinging ? "Live Sing · \(singStateLabel)" : cString(m.status.message)).font(.caption).foregroundStyle(.secondary).lineLimit(1); Spacer() }.padding(.horizontal,20).padding(.top,8)
             HStack(spacing: 0) {
                 ScrollView {
                 VStack(spacing: 14) {
                     captureSection.padding(.horizontal,20).padding(.top,12)
-                    waveformView.frame(height: 205).padding(.horizontal, 20)
-                    transport
-                    HStack(spacing: 24) { parameter("Speed", value: $speed, range: 0.25...1.5, display: "\(Int(speed * 100))%", step: 0.05) { m.setSpeed(speed) }; parameter("Pitch", value: $pitch, range: -12...12, display: String(format: "%+.0f st", pitch), step: 1) { m.setPitch(pitch + cents / 100) } }.padding(.horizontal, 24)
-                    HStack { Text("Fine tune").font(.caption).foregroundStyle(.secondary); Button("−") { cents=max(-100,cents-1); m.setPitch(pitch+cents/100) }; Slider(value:$cents,in:-100...100,step:1).tint(accent).onChange(of:cents) { _,_ in m.setPitch(pitch+cents/100) }; Text(String(format:"%+.0f¢",cents)).font(.system(.caption,design:.monospaced)); Button("+") { cents=min(100,cents+1); m.setPitch(pitch+cents/100) } }.padding(.horizontal,24)
-                    stemMixer
-                    trainerControls
+                    if m.isSinging {
+                        liveSingControls.padding(.horizontal,20)
+                    } else {
+                        waveformView.frame(height: 205).padding(.horizontal, 20)
+                        transport
+                        HStack(spacing: 24) { parameter("Speed", value: $speed, range: 0.25...1.5, display: "\(Int(speed * 100))%", step: 0.05) { m.setSpeed(speed) }; parameter("Pitch", value: $pitch, range: -12...12, display: String(format: "%+.0f st", pitch), step: 1) { m.setPitch(pitch + cents / 100) } }.padding(.horizontal, 24)
+                        HStack { Text("Fine tune").font(.caption).foregroundStyle(.secondary); Button("−") { cents=max(-100,cents-1); m.setPitch(pitch+cents/100) }; Slider(value:$cents,in:-100...100,step:1).tint(accent).onChange(of:cents) { _,_ in m.setPitch(pitch+cents/100) }; Text(String(format:"%+.0f¢",cents)).font(.system(.caption,design:.monospaced)); Button("+") { cents=min(100,cents+1); m.setPitch(pitch+cents/100) } }.padding(.horizontal,24)
+                        stemMixer
+                        trainerControls
+                    }
                     Spacer(minLength: 0)
                 }.frame(maxWidth: .infinity)
                 }
@@ -303,6 +311,7 @@ struct PracticeView: View {
                     .help(m.capturing ? "Stop capture and keep the captured audio available" : "Start capture and replace the current capture buffer")
             }
             HStack { Stepper(value:$m.grabSeconds,in:1...180,step:1) { Text("Duration · \(Int(m.grabSeconds))s") }.frame(width:210); Button(m.grabLabel) { m.grab() }.buttonStyle(.borderedProminent).disabled(!m.canGrab) }
+            HStack { Button("Live Sing…") { openWindow(id: "sing") }; if m.isSinging { Text(m.status.sing_state == 4 ? "Waiting for source audio" : singStateLabel).font(.caption).foregroundStyle(.secondary) } }
             Text(m.captureLabel).font(.caption).foregroundStyle(.secondary)
             Text("Play audio in the source, start capture, then grab a section. Capture keeps the latest three minutes.").font(.caption).foregroundStyle(.secondary)
         }.padding(12).background(Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:8))
@@ -311,36 +320,54 @@ struct PracticeView: View {
         GeometryReader { geo in
             let w = geo.size.width, h = geo.size.height
             ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor))
+                RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)).allowsHitTesting(false)
                 Canvas { ctx, size in
                     for i in 0...8 { let x = size.width * CGFloat(i) / 8; var p = Path(); p.move(to: CGPoint(x:x,y:12)); p.addLine(to: CGPoint(x:x,y:size.height-12)); ctx.stroke(p, with: .color(Color(nsColor: .separatorColor).opacity(0.35)), lineWidth: 1) }
                     for beat in m.beats { let x = CGFloat(beat / max(0.1, m.status.duration)) * size.width; var p=Path(); p.move(to: CGPoint(x:x,y:8)); p.addLine(to: CGPoint(x:x,y:size.height-8)); ctx.stroke(p, with: .color(accent.opacity(0.18)), lineWidth: 1) }
                     if m.waveform.isEmpty { }
                     else { let stride = max(1,m.waveform.count/500); for i in Swift.stride(from: 0, to: m.waveform.count, by: stride) { let f=CGFloat(i)/CGFloat(m.waveform.count); let amp=CGFloat(abs(m.waveform[i]))*size.height*0.42; var p=Path(); p.move(to: CGPoint(x:f*size.width,y:size.height/2-amp)); p.addLine(to: CGPoint(x:f*size.width,y:size.height/2+amp)); ctx.stroke(p, with: .color(accent.opacity(0.75)), lineWidth: 1) } }
-                }
-                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1).offset(y: 0)
+                }.allowsHitTesting(false)
+                Color.clear.contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { value in if w > 0 { m.seek(Double(value.location.x / w) * m.status.duration) } })
+                    .simultaneousGesture(DragGesture(minimumDistance: 8).onEnded { value in if w > 0 { m.seek(Double(value.location.x / w) * m.status.duration) } })
+                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1).offset(y: 0).allowsHitTesting(false)
                 let a = CGFloat(m.status.loop_a / max(0.1,m.status.duration))*w, b = CGFloat(m.status.loop_b / max(0.1,m.status.duration))*w
-                Rectangle().fill(accent.opacity(0.09)).frame(width: max(0,b-a), height: h).offset(x: (a+b)/2-w/2)
-                if m.waveform.isEmpty { Text("Grab a clip to see its waveform").font(.caption).foregroundStyle(.secondary) }
+                Rectangle().fill(accent.opacity(0.09)).frame(width: max(0,b-a), height: h).offset(x: (a+b)/2-w/2).allowsHitTesting(false)
+                if m.waveform.isEmpty { Text("Grab a clip to see its waveform").font(.caption).foregroundStyle(.secondary).allowsHitTesting(false) }
                 marker("A", x: a, width:w, height: h, active: draggingA).gesture(DragGesture().onChanged { v in if !draggingA { dragStartA=m.status.loop_a }; draggingA=true; m.loopA(max(0,dragStartA+Double(v.translation.width/w)*m.status.duration),m.status.loop_b) }.onEnded { _ in draggingA=false })
                 marker("B", x: b, width:w, height: h, active: draggingB).gesture(DragGesture().onChanged { v in if !draggingB { dragStartB=m.status.loop_b }; draggingB=true; m.loopA(m.status.loop_a,max(0,dragStartB+Double(v.translation.width/w)*m.status.duration)) }.onEnded { _ in draggingB=false })
-                Rectangle().fill(Color.primary.opacity(0.75)).frame(width: 1).offset(x: CGFloat(m.status.position/max(0.1,m.status.duration))*w-w/2)
-                VStack { HStack { Text("Loop region").font(.caption.weight(.semibold)); Spacer(); Text("\(time(m.status.duration))").font(.system(.caption,design:.monospaced)) }; Spacer(); HStack { Toggle("Snap to beat", isOn: $m.snap).controlSize(.small); Spacer(); Text("Drag to align grid").font(.caption).foregroundStyle(.secondary) } }.padding(12)
-            }.contentShape(Rectangle()).gesture(DragGesture(minimumDistance: 3).onChanged { v in gridOffset = v.translation.width / max(1,w) * m.status.duration; ws_grid_offset(m.ws, gridOffset) })
+                Rectangle().fill(Color.primary.opacity(0.75)).frame(width: 1).offset(x: CGFloat(m.status.position/max(0.1,m.status.duration))*w-w/2).allowsHitTesting(false)
+                VStack { HStack { Text("Loop region").font(.caption.weight(.semibold)); Spacer(); Text("\(time(m.status.duration))").font(.system(.caption,design:.monospaced)) }; Spacer(); HStack { Toggle("Snap to beat", isOn: $m.snap).controlSize(.small); Spacer(); Text("Click or drag to seek").font(.caption).foregroundStyle(.secondary).allowsHitTesting(false) } }.padding(12)
+            }
         }
     }
     func marker(_ label:String,x:CGFloat,width:CGFloat,height:CGFloat,active:Bool)->some View { VStack(spacing:0) { Text(label).font(.caption2.weight(.semibold)).foregroundStyle(.white).frame(width:22,height:20).background(accent, in: RoundedRectangle(cornerRadius:4)); Rectangle().fill(accent).frame(width:2,height:height-42) }.position(x:min(max(12,x), max(12,width-12)),y:height/2) }
-    var transport: some View { HStack(spacing: 12) {
-        Button { m.togglePlay() } label: { Label(m.status.playing == 0 ? "Play" : "Pause", systemImage: m.status.playing == 0 ? "play.fill" : "pause.fill") }.buttonStyle(.borderedProminent).tint(accent).disabled(m.status.duration < 0.1)
-        Button { nudgeEndpoint(-1) } label: { Label("Previous beat", systemImage:"backward.end") }.labelStyle(.iconOnly).help("Move loop start back one beat").disabled(m.status.duration < 0.1)
-        Button { nudgeEndpoint(1) } label: { Label("Next beat", systemImage:"forward.end") }.labelStyle(.iconOnly).help("Move loop end forward one beat").disabled(m.status.duration < 0.1)
-        VStack(alignment:.leading,spacing:5) { ProgressView(value: max(0,min(1,m.status.progress))); HStack { Text(time(m.status.position)); Spacer(); Text(time(m.status.duration)) }.font(.system(.caption,design:.monospaced)).foregroundStyle(.secondary) }.frame(maxWidth:.infinity)
-        Text(String(format:"%.0f BPM",m.status.bpm)).font(.system(.caption,design:.monospaced))
+    var liveSingControls: some View { LiveSingControls(showsReturnToClip: true) }
+    var singStateLabel: String {
+        switch m.status.sing_state {
+        case 1: return "Buffering source audio"
+        case 2: return "Processing audio"
+        case 3: return "Playing Sing audio"
+        case 4: return "Waiting for source audio"
+        default: return "Live Sing active"
+        }
+    }
+    var transport: some View { VStack(spacing:8) {
+        HStack(spacing:12) {
+            Button { m.togglePlay() } label: { Label(m.status.playing == 0 ? "Play Clip" : "Pause", systemImage: m.status.playing == 0 ? "play.fill" : "pause.fill") }.buttonStyle(.borderedProminent).tint(accent).disabled(m.status.duration < 0.1)
+            Button { m.seek(m.status.position - 5) } label: { Image(systemName:"gobackward.5") }.help("Back 5 seconds").disabled(m.status.duration < 0.1)
+            Button { m.seek(m.status.position + 5) } label: { Image(systemName:"goforward.5") }.help("Forward 5 seconds").disabled(m.status.duration < 0.1)
+            Text(String(format:"%.0f BPM",m.status.bpm)).font(.system(.caption,design:.monospaced))
+        }
+        HStack { Text(time(m.status.position)).font(.system(.caption,design:.monospaced)); Slider(value:Binding(get:{m.status.position},set:{m.seek($0)}),in:0...max(0.1,m.status.duration)).disabled(m.status.duration < 0.1); Text(time(m.status.duration)).font(.system(.caption,design:.monospaced)) }
+        HStack { Toggle("Loop",isOn:Binding(get:{m.status.looping != 0},set:{m.loopEnabled($0)})).disabled(m.status.duration < 0.1); Button("A") { m.loopA(m.status.position,m.status.loop_b) }.disabled(m.status.duration < 0.1); Button("B") { m.loopA(m.status.loop_a,m.status.position) }.disabled(m.status.duration < 0.1); Toggle("Snap",isOn:$m.snap).controlSize(.small); Spacer(); Text("Grid offset"); Slider(value:$gridOffset,in:-0.5...0.5,step:0.01).frame(width:110).disabled(m.status.duration < 0.1).onChange(of:gridOffset) { _,v in ws_grid_offset(m.ws,v) } }.font(.caption)
     }.padding(.horizontal,22) }
     var stemMixer: some View { VStack(spacing:8) { HStack { Text("Stem levels").font(.headline); Spacer(); Button { openWindow(id: "sing") } label: { Label("Sing panel",systemImage:"mic") }.buttonStyle(.bordered) }
         if m.modelSix.isEmpty { Text("Choose a 6-stem separation model to enable stem controls").font(.caption).foregroundStyle(.secondary); Button("Choose Model") { m.modelPicker(six:true) } }
-        else if m.status.stems_ready == 0 && m.status.busy != 0 { HStack { ProgressView(value:Double(m.status.progress)); Text("Separating stems… \(Int(m.status.progress*100))%").font(.caption).foregroundStyle(.secondary) } }
-        else if m.status.stems_ready == 0 { Text("Model selected · loads when separation begins").font(.caption).foregroundStyle(.secondary) }
+        if m.status.stems_ready > 0 && m.status.current_stems_ready == 0 { Text("This part of the clip still plays the original mix. Mute and Solo apply once its stems are ready.").font(.caption).foregroundStyle(.secondary) }
+        if m.status.stems_ready > 0 { Text("Pause the source app to hear only this clip.").font(.caption).foregroundStyle(.secondary) }
+        if m.status.busy != 0 { HStack { ProgressView(value:Double(m.status.progress)); Text("Separating · \(Int(m.status.progress*100))%").font(.caption).foregroundStyle(.secondary) } }
+        else if m.status.stems_ready == 0 && m.status.busy == 0 && (!m.modelSix.isEmpty || !m.modelFour.isEmpty) { Text("Model selected · loads when separation begins").font(.caption).foregroundStyle(.secondary) }
         ForEach(0..<6,id:\.self) { i in StemRow(index:i,name:names[i]) }
     }.padding(.horizontal,24).padding(.top,5) }
     var trainerControls: some View { GroupBox("Loop trainer") { VStack(alignment:.leading,spacing:10) {
@@ -353,7 +380,7 @@ struct PracticeView: View {
         HStack { Spacer(); Button("Start Trainer") { m.trainer=true; configureTrainer(); ws_play(m.ws,1) }.buttonStyle(.borderedProminent).tint(accent).disabled(m.status.duration < 0.1) }
     }.frame(maxWidth:.infinity,alignment:.leading) }.padding(.horizontal,20) }
     var sidebar: some View { ScrollView { VStack(alignment:.leading,spacing:14) {
-        GroupBox("Session") { VStack(alignment:.leading,spacing:8) { metric("Capture", m.capturing ? "Capturing" : (m.status.buffered >= 0.1 ? "Stopped" : "Not capturing")); metric("Clip", "\(Int(m.status.duration))s"); metric("Loop", "\(time(m.status.loop_a)) – \(time(m.status.loop_b))"); metric("Key", keyName(m.status.key)); metric("Status", m.status.busy != 0 ? "Processing" : (m.status.playing != 0 ? "Playing" : "Ready")) }.frame(maxWidth:.infinity,alignment:.leading) }
+        GroupBox("Session") { VStack(alignment:.leading,spacing:8) { metric("Capture", m.capturing ? "Capturing" : (m.status.buffered >= 0.1 ? "Stopped" : "Not capturing")); metric("Clip", "\(Int(m.status.duration))s"); metric("Loop", "\(time(m.status.loop_a)) – \(time(m.status.loop_b))"); metric("Key", keyName(m.status.key)); metric("Status", sessionStatus) }.frame(maxWidth:.infinity,alignment:.leading) }
         GroupBox("Recent clips") {
             VStack(alignment:.leading,spacing:8) {
                 if m.history.isEmpty { ContentUnavailableView("No clips yet", systemImage:"waveform", description:Text("Choose a source and grab a moment to practice.")) }
@@ -371,6 +398,7 @@ struct PracticeView: View {
         Spacer()
     }.padding(18).frame(maxWidth:.infinity,alignment:.topLeading) }.frame(maxHeight:.infinity) }
     func metric(_ title:String,_ value:String)->some View { HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(value).font(.system(size:11,weight:.medium,design:.monospaced)) }.font(.caption) }
+    var sessionStatus:String { if m.isSinging { return "Live Sing · \(singStateLabel)" }; return m.status.busy != 0 ? "Processing" : (m.status.playing != 0 ? "Playing clip" : "Ready") }
     func modelLabel(_ title:String,path:String)->some View { HStack { Image(systemName:"shippingbox").foregroundStyle(accent); Text(title); Spacer(); Text(path.isEmpty ? "Choose ONNX / BIN" : URL(fileURLWithPath:path).lastPathComponent).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }.help("ONNX preferred; BIN also supported") }
     func parameter(_ name:String,value:Binding<Double>,range:ClosedRange<Double>,display:String,step:Double,changed:@escaping()->Void)->some View { VStack(alignment:.leading,spacing:6) { HStack { Text(name).font(.caption).foregroundStyle(.secondary); Spacer(); Text(display).font(.system(.caption,design:.monospaced)) }; HStack(spacing:8) { Button("−") { value.wrappedValue=max(range.lowerBound,value.wrappedValue-step); changed() }.buttonStyle(.plain); Slider(value:value,in:range,onEditingChanged:{ _ in changed() }).tint(accent); Button("+") { value.wrappedValue=min(range.upperBound,value.wrappedValue+step); changed() }.buttonStyle(.plain) } }.frame(maxWidth:.infinity) }
     func configureTrainer() { ws_trainer(m.ws,m.trainer ? 1:0,Float(trainerStart),Float(trainerStep),Int32(trainerEvery)) }
@@ -386,6 +414,9 @@ struct PracticeView: View {
         if !event.modifierFlags.intersection([.command, .control, .option]).isEmpty { return event }
         if NSApp.keyWindow?.firstResponder is NSTextView || NSApp.keyWindow?.firstResponder is NSTextField { return event }
         if event.keyCode == 49 { m.togglePlay(); return nil }
+        if m.isSinging { return event }
+        if event.keyCode == 123 { m.seek(m.status.position - 5); return nil }
+        if event.keyCode == 124 { m.seek(m.status.position + 5); return nil }
         let key=event.charactersIgnoringModifiers ?? ""
         if key == "[" { guard m.status.duration >= 0.1 else { return nil }; nudgeEndpoint(-1); return nil }; if key == "]" { guard m.status.duration >= 0.1 else { return nil }; nudgeEndpoint(1); return nil }
         if key == "," { speed=max(0.25,speed-0.05); m.setSpeed(speed); return nil }; if key == "." { speed=min(1.5,speed+0.05); m.setSpeed(speed); return nil }
@@ -404,19 +435,47 @@ struct StemRow: View {
 
 struct SingPanel: View {
     @EnvironmentObject var m:PracticeModel
-    @State private var removal=0.7; @State private var transpose=0.0
+    var body: some View { LiveSingControls(showsReturnToClip: true).background(FloatingLevelAccessor()) }
+}
+
+struct LiveSingControls: View {
+    @EnvironmentObject var m:PracticeModel
+    var showsReturnToClip: Bool
+    var stateLabel: String {
+        switch m.status.sing_state { case 1:return "Buffering input"; case 2:return "Processing"; case 3:return "Playing Sing audio"; case 4:return "Waiting for source audio"; default:return "Stopped" }
+    }
     var body: some View { VStack(alignment:.leading,spacing:12) {
-        HStack { Text("Sing Along").font(.headline); Spacer(); Toggle("Enabled",isOn:Binding(get:{m.status.sing != 0},set:{ if $0 != (m.status.sing != 0) { m.toggleSing() } })).disabled(!m.capturing && m.status.sing == 0) }
-        if m.modelSix.isEmpty && m.modelFour.isEmpty {
-            Text("Without a model, Sing uses basic center-channel cancellation.").font(.caption).foregroundStyle(.secondary)
-            Button("Choose separation model") { m.modelPicker(six:true) }
-        } else if m.status.sing == 0 { Text("Selected model loads when Sing starts").font(.caption).foregroundStyle(.secondary) }
-        GroupBox("Vocal removal") { Slider(value:$removal,in:0...1).tint(accent).disabled(m.status.sing == 0).onChange(of:removal) { _,v in if m.status.sing != 0 { ws_vocals(m.ws,Float(v)) } } }
-        GroupBox("Transpose") { HStack { Button("−") { transpose=max(-6,transpose-1) }; Text(String(format:"%+.0f semitones",transpose)).font(.system(.body,design:.monospaced)); Button("+") { transpose=min(6,transpose+1) } }.onChange(of:transpose) { _,v in if m.status.sing != 0 { ws_pitch(m.ws,Float(v)) } } }.disabled(m.status.sing == 0)
-        GroupBox("Separation") { HStack { Text("Automatic"); Spacer(); Text(m.status.sing == 0 ? "Stopped" : (["6-stem", "4-stem", "Center"].indices.contains(Int(m.status.quality)) ? ["6-stem", "4-stem", "Center"][Int(m.status.quality)] : "Basic center cancellation")).foregroundStyle(.secondary) } }
-        Label(String(format:"Delayed audio · %.1f s latency",m.status.sing_latency),systemImage:"clock").foregroundStyle(.secondary)
-        Text(cString(m.status.message)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-    }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(FloatingLevelAccessor()).onAppear { removal = Double(m.status.vocal_removal) } }
+        HStack { Label("Live Sing",systemImage:"mic.fill").font(.headline); Spacer(); Text(stateLabel).font(.caption).foregroundStyle(.secondary) }
+        if m.status.sing == 0 {
+            Text(m.capturing ? "Play audio in \(m.capturedSourceName), then click Start Sing." : "Choose a source and click Start Capture in the main window before starting Sing.").font(.caption).foregroundStyle(.secondary)
+        } else {
+            Text("Source: \(m.capturedSourceName)").font(.subheadline)
+            if m.status.sing_state == 1 || m.status.sing_state == 2 {
+                HStack { Text(stateLabel); Spacer(); Text(String(format:"%.1f s buffered",m.status.sing_buffered)) }.font(.caption).foregroundStyle(.secondary)
+                ProgressView(value:min(1,max(0,m.status.sing_buffered / 6)))
+            } else if m.status.sing_state == 3 {
+                Label(String(format:"Audio latency · %.1f s",m.status.sing_latency),systemImage:"clock").font(.caption).foregroundStyle(.secondary)
+                Text(String(format:"%.1f s played",m.status.sing_position)).font(.system(.caption,design:.monospaced)).foregroundStyle(.secondary)
+            } else if m.status.sing_state == 4 {
+                Text("Play audio in \(m.capturedSourceName) to continue.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        GroupBox("Vocal reduction · \(Int(m.status.vocal_removal * 100))%") {
+            Slider(value:Binding(get:{Double(m.status.vocal_removal)},set:{ws_vocals(m.ws,Float($0)); m.poll()}),in:0...1).tint(accent).disabled(m.status.sing == 0)
+        }
+        GroupBox("Transpose") { HStack {
+            Button("−") { ws_sing_pitch(m.ws,max(-6,m.status.sing_pitch-1)); m.poll() }.disabled(m.status.sing == 0 || m.status.sing_pitch <= -6)
+            Text(String(format:"%+.0f semitones",Double(m.status.sing_pitch))).font(.system(.body,design:.monospaced))
+            Button("+") { ws_sing_pitch(m.ws,min(6,m.status.sing_pitch+1)); m.poll() }.disabled(m.status.sing == 0 || m.status.sing_pitch >= 6)
+        }.frame(maxWidth:.infinity) }
+        GroupBox("Separation") { HStack { Text("Automatic"); Spacer(); Text(qualityName).foregroundStyle(.secondary) } }
+        if m.status.quality == 2 {
+            Text("Center fallback reduces centered sound, including centered instruments and mono audio; it cannot isolate vocals.").font(.caption).foregroundStyle(.secondary)
+        }
+        Text("To skip or pause live audio, use the source app. Use the clip for looping and individual stem controls.").font(.caption).foregroundStyle(.secondary)
+        HStack { Button(m.status.sing == 0 ? "Start Sing" : "Stop Sing") { m.toggleSing() }.buttonStyle(.borderedProminent).disabled(m.status.sing == 0 && !m.capturing); Spacer(); if showsReturnToClip { Button("Return to Clip") { ws_play(m.ws,1); m.poll() }.disabled(m.status.duration < 0.1) } }
+    }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:10)) }
+    var qualityName:String { if m.status.sing == 0 { return "Stopped" }; switch m.status.quality { case 0:return "6-stem"; case 1:return "4-stem"; case 2:return "Center fallback"; default:return "Automatic" } }
 }
 
 private struct FloatingLevelAccessor: NSViewRepresentable {

@@ -4,7 +4,7 @@ Play audio in the source app, choose it in **Capture**, then click **Start Captu
 
 You can pause the source app before playing a clip, or turn on **Pause source on Grab**. Control–Option–G grabs from an available buffer. It does not start capture.
 
-In Practice, drag A and B to set the loop. Space plays or pauses the clip. Use the stem controls to solo or mute separated parts; unfinished regions play the original mix. The speed and pitch controls support slower practice and transposition.
+In Practice, use **Play** and **Loop** to play a clip. Drag A and B on the timeline to set the loop. Click or drag the timeline to seek. Use the stem controls to solo or mute separated parts; unfinished regions play the original mix. The speed and pitch controls support slower practice and transposition.
 
 ## Live Sing
 

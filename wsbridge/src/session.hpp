@@ -52,6 +52,8 @@ public:
     void demo();
     void status(WSStatus*);
     void play(bool);
+    void seek(double);
+    void loopEnabled(bool);
     void speed(float);
     void pitch(float);
     void loop(double, double, bool);
@@ -66,6 +68,7 @@ public:
     void model(const char*, const char*);
     void setSing(bool);
     void vocals(float);
+    void singPitch(float);
     void setPause(bool value) { pauseSource = value; }
 };
 }

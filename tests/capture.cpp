@@ -8,6 +8,8 @@
 #include <thread>
 
 extern int mock_tap_starts;
+extern int mock_output_active;
+void mock_render(float* left, float* right, unsigned frames);
 
 namespace {
 void require(bool condition, const char* message) {
@@ -30,7 +32,7 @@ WSStatus waitForClip(WS* h, uint64_t previous = 0) {
 
 int main() {
     try {
-        setenv("HALFTAPE_HEADLESS", "1", 1);
+        unsetenv("HALFTAPE_HEADLESS");
         WS* h = ws_create();
         require(h, "session creation failed");
         auto s = status(h);
@@ -68,10 +70,31 @@ int main() {
                 "Sing should not restart a stopped capture with retained audio");
         require(mock_tap_starts == startsBeforeStoppedSing, "Sing attempted to rearm stopped capture");
 
+        ws_count_in(h, 0);
         ws_grab(h, 1.0);
         auto clip = waitForClip(h);
         require(clip.history_count == 1 && clip.duration > .9, "stopped buffer did not produce a history clip");
         require(std::abs(status(h).buffered - captured) < .05, "grab changed the stopped capture buffer");
+        ws_play(h, 1);
+        float left[512]{}, right[512]{};
+        for (int i = 0; i < 24; ++i) mock_render(left, right, 512);
+        double energy = 0;
+        for (int i = 0; i < 512; ++i) energy += std::abs(left[i]) + std::abs(right[i]);
+        require(energy > 1.0, "fake output did not render the captured clip");
+        require(status(h).position > 0, "rendering did not advance the clip position");
+        ws_play(h, 0);
+        ws_seek(h, .4);
+        std::memset(left, 0, sizeof(left));
+        std::memset(right, 0, sizeof(right));
+        mock_render(left, right, 512);
+        require(std::abs(status(h).position - .4) < .02, "paused rendering moved away from the seek position");
+        ws_loop(h, .2, .6, 0);
+        ws_seek(h, .8);
+        require(!status(h).looping, "seeking outside the loop should disable looping");
+        ws_loop_enabled(h, 1);
+        require(status(h).looping, "loop enabling wrapper did not reenable looping");
+        ws_loop_enabled(h, 0);
+        ws_play(h, 1);
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
         require(mock_tap_starts == 1 && !status(h).capturing, "grab silently restarted capture");
 
@@ -96,6 +119,27 @@ int main() {
         s = status(h);
         require(std::abs(s.buffered - singStoppedBuffer) < .02, "stopped Sing capture continued growing");
         require(mock_tap_starts == 3, "stopping Sing silently rearmed capture");
+
+        ws_seek(h, .1);
+        require(ws_arm(h, 43) == 1, "could not rearm source for Sing return test");
+        const int startsBeforeActiveSing = mock_tap_starts;
+        ws_sing(h, 1);
+        s = status(h);
+        require(s.sing && s.capturing && mock_tap_starts == startsBeforeActiveSing + 1,
+                "second Sing session did not start from active capture");
+        ws_play(h, 1);
+        std::memset(left, 0, sizeof(left));
+        std::memset(right, 0, sizeof(right));
+        double beforeReturn = status(h).position;
+        for (int i = 0; i < 24; ++i) mock_render(left, right, 512);
+        energy = 0;
+        for (int i = 0; i < 512; ++i) energy += std::abs(left[i]) + std::abs(right[i]);
+        s = status(h);
+        require(!s.sing && !s.capturing && s.position > beforeReturn && energy > 1.0,
+                "play during Sing did not return to audible prior clip playback");
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        require(mock_tap_starts == startsBeforeActiveSing + 1 && !status(h).capturing,
+                "play after Sing returned silently rearmed capture");
 
         ws_disarm(h);
         s = status(h);

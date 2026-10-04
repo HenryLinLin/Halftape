@@ -19,12 +19,14 @@ class Engine {
     std::array<std::array<float, 384>, 2> input{};
     double remainder = 0;
     uint32_t position = 0;
+    unsigned tailRemaining = 0;
+    std::atomic<uint64_t> pendingSeek{UINT64_MAX};
     float limitGain = 1;
     uint64_t countRemaining = 0, countTotal = 0;
     std::array<float, stemCount> smooth{1, 1, 1, 1, 1, 1};
 public:
     std::array<std::atomic<float>, stemCount> gains;
-    std::atomic<bool> playing{false}, trainerEnabled{false}, countRequested{false};
+    std::atomic<bool> playing{false}, looping{true}, trainerEnabled{false}, countRequested{false};
     std::atomic<float> trainerStep{.05f};
     std::atomic<unsigned> trainerEvery{2};
     std::atomic<float> speed{1}, pitch{0};
@@ -34,7 +36,11 @@ public:
     Engine() { stretch.presetDefault(2, rate); for (auto& gain : gains) gain.store(1); }
     void publish(std::unique_ptr<Playback> next) {
         auto* p = next.get(); owned.push_back(std::move(next));
+        pendingSeek.store(UINT64_MAX, std::memory_order_release);
         published.store(p, std::memory_order_seq_cst); collect();
+    }
+    void seek(uint64_t clipID, uint32_t frame) {
+        pendingSeek.store((clipID << 32) | frame, std::memory_order_release);
     }
     void collect() {
         auto* protectedClip = hazard.load(std::memory_order_seq_cst);
@@ -49,16 +55,28 @@ public:
         Playback* data;
         do { data = published.load(std::memory_order_seq_cst); hazard.store(data, std::memory_order_seq_cst); }
         while (data != published.load(std::memory_order_seq_cst));
-        if (!data || !playing.load(std::memory_order_relaxed) || data->clip->audio[0].empty()) {
+        if (!data || data->clip->audio[0].empty()) {
             std::fill_n(left, count, 0); std::fill_n(right, count, 0);
             hazard.store(nullptr, std::memory_order_seq_cst); return;
         }
         auto size = uint32_t(data->clip->audio[0].size());
         auto range = loop.load(std::memory_order_acquire);
-        auto a = std::min(uint32_t(range >> 32), size - 1);
-        auto b = std::clamp(uint32_t(range), a + 1, size);
-        if (lastID != data->clip->id) { stretch.reset(); lastID = data->clip->id; position = a; remainder = 0; loops.store(0); }
-        if (position < a || position >= b) position = a;
+        bool repeat = looping.load(std::memory_order_acquire);
+        auto a = repeat ? std::min(uint32_t(range >> 32), size - 1) : 0;
+        auto b = repeat ? std::clamp(uint32_t(range), a + 1, size) : size;
+        if (lastID != data->clip->id) { stretch.reset(); lastID = data->clip->id; position = a; remainder = 0; tailRemaining = 0; countRemaining = 0; loops.store(0); }
+        auto request = pendingSeek.load(std::memory_order_acquire);
+        if (request != UINT64_MAX && uint32_t(request >> 32) == uint32_t(data->clip->id) &&
+            pendingSeek.compare_exchange_strong(request, UINT64_MAX, std::memory_order_acq_rel)) {
+            position = std::min(uint32_t(request), size);
+            stretch.reset(); remainder = 0; tailRemaining = 0; countRemaining = 0; countRequested.store(false);
+        }
+        if (repeat && (position < a || position >= b)) position = a;
+        playhead.store(double(position) / rate, std::memory_order_relaxed);
+        if (!playing.load(std::memory_order_relaxed)) {
+            std::fill_n(left, count, 0); std::fill_n(right, count, 0);
+            hazard.store(nullptr, std::memory_order_seq_cst); return;
+        }
         float ratio = std::clamp(speed.load(std::memory_order_relaxed), .25f, 1.5f);
         float transpose = std::clamp(pitch.load(std::memory_order_relaxed), -13.f, 13.f);
         stretch.setTransposeSemitones(transpose);
@@ -102,8 +120,14 @@ public:
                 }
                 return data->clip->audio[channel][frame];
             };
-            unsigned fade = std::min(441u, (b - a) / 4);
+            unsigned fade = repeat ? std::min(441u, (b - a) / 4) : 0;
             for (unsigned i = 0; i < needed; ++i) {
+                if (position >= size) {
+                    input[0][i] = input[1][i] = 0;
+                    if (tailRemaining) --tailRemaining;
+                    if (!tailRemaining) playing.store(false, std::memory_order_relaxed);
+                    continue;
+                }
                 auto reveal = [&](unsigned frame) {
                     if (!data->stems) return;
                     auto index = frame / segmentFrames;
@@ -121,6 +145,7 @@ public:
                     input[c][i] = value;
                 }
                 if (++position >= b) {
+                    if (!repeat) { tailRemaining = stretch.inputLatency() + unsigned(std::ceil(ratio * stretch.outputLatency())); continue; }
                     position = a + fade;
                     auto completed = loops.fetch_add(1, std::memory_order_relaxed) + 1;
                     if (trainerEnabled.load(std::memory_order_relaxed) && completed % std::max(1u, trainerEvery.load()) == 0)

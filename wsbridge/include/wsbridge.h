@@ -15,6 +15,9 @@ typedef struct {
     int capturing, stems_ready;
     uint32_t capture_source;
     char capture_name[128];
+    int looping, sing_state, current_stems_ready;
+    double sing_buffered, sing_position;
+    float sing_pitch;
 } WSStatus;
 typedef struct { uint64_t id; double duration; char title[160]; } WSHistory;
 WS* ws_create(void);
@@ -42,6 +45,9 @@ void ws_set_model(WS*, const char* six_path, const char* four_path);
 void ws_sing(WS*, int enabled);
 void ws_vocals(WS*, float removal);
 void ws_pause_source(WS*, int enabled);
+void ws_seek(WS*, double seconds);
+void ws_loop_enabled(WS*, int enabled);
+void ws_sing_pitch(WS*, float semitones);
 #ifdef __cplusplus
 }
 #endif

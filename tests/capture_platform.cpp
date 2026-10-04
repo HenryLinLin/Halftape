@@ -4,6 +4,14 @@
 #include <stdexcept>
 
 int mock_tap_starts = 0;
+namespace {
+ws::Render active_render = nullptr;
+void* active_context = nullptr;
+}
+int mock_output_active = 0;
+void mock_render(float* left, float* right, unsigned frames) {
+    if (active_render) active_render(active_context, left, right, frames);
+}
 
 namespace ws {
 struct Tap::Impl {};
@@ -29,8 +37,16 @@ void Tap::stop() {
 
 Output::Output() : impl(std::make_unique<Impl>()) {}
 Output::~Output() = default;
-void Output::start(Render, void*) {}
-void Output::stop() {}
+void Output::start(Render render, void* context) {
+    active_render = render;
+    active_context = context;
+    ++mock_output_active;
+}
+void Output::stop() {
+    if (mock_output_active > 0) --mock_output_active;
+    active_render = nullptr;
+    active_context = nullptr;
+}
 
 std::vector<Source> sources() {
     return {{42, 1, "Mock Source A", "mock.a", true},

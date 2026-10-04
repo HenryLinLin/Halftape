@@ -65,6 +65,7 @@ void Session::activate(const Item& item) {
     active = item; gridOffset = 0;
     engine.publish(std::make_unique<Playback>(Playback{item.clip, item.stems}));
     engine.setLoop(0, std::min(8., item.clip->seconds()));
+    engine.looping.store(true);
     engine.playing.store(true);
     if (counting) engine.countRequested.store(true);
 }
@@ -87,6 +88,7 @@ void Session::submitClip(Stereo audio, unsigned sampleRate, std::string title) {
             }
             {
                 std::lock_guard lock(mutex);
+                if (ticket != generation.load()) return;
                 history.push_front(item);
                 if (history.size() > 20) {
                     std::error_code ec; std::filesystem::remove(tempDir / (std::to_string(history.back().clip->id) + ".pcm"), ec); history.pop_back();
@@ -134,19 +136,64 @@ void Session::status(WSStatus* s) {
     text(s->capture_name, sourceName);
     s->busy = busy.load(); s->progress = progress.load();
     s->capture_drops = tap.dropped.load();
-    s->position = engine.playhead.load(); s->playing = engine.playing.load(); s->loops = engine.loops.load();
-    s->speed = engine.speed.load(); s->pitch = sing ? sing->pitch.load() : engine.pitch.load();
+    s->position = engine.playhead.load(); s->playing = !sing && engine.playing.load(); s->loops = engine.loops.load();
+    s->looping = engine.looping.load();
+    s->speed = engine.speed.load(); s->pitch = engine.pitch.load();
     s->sing = bool(sing); s->quality = sing ? sing->quality.load() : 0;
-    s->sing_latency = sing ? sing->delay() : 0; s->vocal_removal = sing ? sing->removal.load() : 1;
+    s->sing_latency = sing ? sing->delay() : 0; s->vocal_removal = sing ? sing->removal.load() : .7f;
+    if (sing) {
+        s->sing_state = sing->state(); s->sing_buffered = sing->buffered();
+        s->sing_position = sing->position(); s->sing_pitch = sing->pitch.load();
+    }
     s->underruns = sing ? sing->underruns.load() : 0;
     auto range = engine.loop.load(); s->loop_a = double(range >> 32) / rate; s->loop_b = double(uint32_t(range)) / rate;
     std::lock_guard lock(mutex);
     engine.collect(); s->history_count = int(history.size()); text(s->message, message);
-    if (active.clip) { s->duration = active.clip->seconds(); s->bpm = active.clip->bpm; s->key = active.clip->key; s->clip_id = active.clip->id; s->stems_ready = active.stems && active.stems->ready.load() > 0; }
+    if (active.clip) {
+        s->duration = active.clip->seconds(); s->bpm = active.clip->bpm; s->key = active.clip->key; s->clip_id = active.clip->id;
+        s->stems_ready = active.stems && active.stems->ready.load() > 0;
+        if (active.stems && active.stems->size) {
+            auto index = std::min(size_t(std::max(0., s->position) * rate) / segmentFrames, active.stems->size - 1);
+            s->current_stems_ready = active.stems->blocks[index].load(std::memory_order_acquire) != nullptr;
+        }
+    }
 }
-void Session::play(bool value) { if (value) { startOutput(); if (counting) engine.countRequested.store(true); } engine.playing.store(value); }
+void Session::play(bool value) {
+    if (sing) {
+        if (!value) return;
+        setSing(false);
+    }
+    Item item;
+    { std::lock_guard lock(mutex); item = active; }
+    if (value && !item.clip) throw std::runtime_error("Grab a clip before starting Practice playback.");
+    if (value) {
+        startOutput();
+        if (engine.playhead.load() >= item.clip->seconds()) seek(0);
+        if (counting) engine.countRequested.store(true);
+        if (!sixPath.empty() && !busy.load() && item.stems->ready.load() < item.stems->size) {
+            auto ticket = ++generation; busy.store(true); std::string path = sixPath;
+            jobs.submit([this, item, ticket, path] {
+                try { separate(item, ticket, path); } catch (const std::exception& e) { if (ticket == generation.load()) error(e.what()); }
+                if (ticket == generation.load()) busy.store(false);
+            }, true);
+        }
+        error("Playing the practice clip. Pause the source app to hear only this clip.");
+    }
+    engine.playing.store(value);
+}
+void Session::seek(double seconds) {
+    if (sing) throw std::runtime_error("Return to Clip to seek. Live Sing follows playback in the source app.");
+    std::lock_guard lock(mutex);
+    if (!active.clip) return;
+    auto position = sane(seconds, 0, active.clip->seconds());
+    auto range = engine.loop.load();
+    if (position < double(range >> 32) / rate || position >= double(uint32_t(range)) / rate) engine.looping.store(false);
+    engine.seek(active.clip->id, uint32_t(position * rate));
+    engine.playhead.store(position);
+}
+void Session::loopEnabled(bool value) { if (!sing) engine.looping.store(value); }
 void Session::speed(float value) { engine.speed.store(sane(value, .25, 1.5)); }
-void Session::pitch(float value) { if (sing) sing->pitch.store(sane(value, -6, 6)); else engine.pitch.store(sane(value, -13, 13)); }
+void Session::pitch(float value) { engine.pitch.store(sane(value, -13, 13)); }
 void Session::loop(double a, double b, bool snap) {
     std::lock_guard lock(mutex); if (!active.clip) return;
     auto& clip = *active.clip;
@@ -160,6 +207,7 @@ void Session::loop(double a, double b, bool snap) {
 void Session::grid(double value) { gridOffset = sane(value, -2, 2); }
 void Session::stem(int index, float level, bool mute, bool solo) {
     if (index < 0 || index >= 6) return;
+    if (sing) throw std::runtime_error("Return to Clip to use the stem mixer. Live Sing has its own vocal removal control.");
     gain[index] = sane(level, 0, 2); muted[index] = mute; soloed[index] = solo;
     bool hasSolo = std::any_of(soloed.begin(), soloed.end(), [](bool x) { return x; });
     for (int i = 0; i < 6; ++i) engine.gains[i].store(muted[i] || (hasSolo && !soloed[i]) ? 0 : gain[i]);
@@ -243,4 +291,5 @@ void Session::setSing(bool enabled) {
     } catch (...) { disarm(); throw; }
 }
 void Session::vocals(float amount) { if (sing) sing->removal.store(sane(amount, 0, 1)); }
+void Session::singPitch(float value) { if (sing) sing->pitch.store(sane(value, -6, 6)); }
 }

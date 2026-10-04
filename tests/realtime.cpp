@@ -33,6 +33,7 @@ int main() {
         engine.gains[k % 6] = k % 3 * .5;
         stems->publish(0, std::move(block));
         engine.countRequested = (k % 10 == 0); engine.collect();
+        engine.seek(k, k % 4000); engine.looping.store(k % 3 != 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     finished = true; audio.join();
