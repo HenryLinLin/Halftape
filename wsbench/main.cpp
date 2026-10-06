@@ -3,6 +3,7 @@
 #include "wscore/resample.hpp"
 #include "wscore/streaming.hpp"
 #include "wscore/sing.hpp"
+#include "wscore/vocal_cancel.hpp"
 #include <chrono>
 #include <sys/resource.h>
 #include <cmath>
@@ -115,18 +116,47 @@ int stream(const std::string& modelPath, const std::string& mixturePath,
                   << "\nvocals_vs_reference_sdr_db: " << sdrDb(vocals, stems[2], count) << '\n';
 
         // Diagnostic least-squares fit: instrument ≈ leakage*vocals + gain*accompaniment.
-        double vv = 0, aa = 0, va = 0, vi = 0, ai = 0;
-        for (int ch = 0; ch < 2; ++ch) for (size_t i = 0; i < count; ++i) {
-            const double v = vocals[ch][i], a = accompaniment[ch][i], y = instrument[ch][i];
-            vv += v * v; aa += a * a; va += v * a; vi += v * y; ai += a * y;
+        auto fit = [&](const char* name, const ws::Stereo& estimate) {
+            double vv = 0, aa = 0, va = 0, vi = 0, ai = 0;
+            for (int ch = 0; ch < 2; ++ch) for (size_t i = 0; i < count; ++i) {
+                const double v = vocals[ch][i], a = accompaniment[ch][i], y = estimate[ch][i];
+                vv += v * v; aa += a * a; va += v * a; vi += v * y; ai += a * y;
+            }
+            const double determinant = vv * aa - va * va;
+            if (std::abs(determinant) > 1e-30) {
+                std::cout << name << "_vocal_leakage_coefficient: " << (vi * aa - ai * va) / determinant
+                          << '\n' << name << "_accompaniment_gain: " << (ai * vv - vi * va) / determinant << '\n';
+            } else {
+                std::cout << name << "_vocal_leakage_coefficient: undefined\n" << name << "_accompaniment_gain: undefined\n";
+            }
+        };
+        fit("instrument", instrument);
+
+        ws::VocalCanceller canceller;
+        ws::Stereo cancelled{std::vector<float>(frames), std::vector<float>(frames)};
+        ws::LiveBlock mix{}, voice{}, delayed{}, result{};
+        size_t written = 0;
+        std::vector<double> cancelUs;
+        for (size_t h = 0; written < frames; ++h) {
+            for (size_t i = 0; i < ws::liveHop; ++i) {
+                const size_t at = h * ws::liveHop + i;
+                mix[i] = voice[i] = {};
+                if (at >= frames) continue;
+                for (auto& stem : stems) { mix[i].l += stem[0][at]; mix[i].r += stem[1][at]; }
+                voice[i] = {stems[2][0][at], stems[2][1][at]};
+            }
+            const auto cancelStart = std::chrono::steady_clock::now();
+            const bool ready = canceller.process(mix, voice, delayed, result);
+            cancelUs.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - cancelStart).count());
+            if (!ready) continue;
+            for (size_t i = 0; i < ws::liveHop && written < frames; ++i, ++written) {
+                cancelled[0][written] = result[i].l;
+                cancelled[1][written] = result[i].r;
+            }
         }
-        const double determinant = vv * aa - va * va;
-        if (std::abs(determinant) > 1e-30) {
-            std::cout << "instrument_vocal_leakage_coefficient: " << (vi * aa - ai * va) / determinant
-                      << "\ninstrument_accompaniment_gain: " << (ai * vv - vi * va) / determinant << '\n';
-        } else {
-            std::cout << "instrument_vocal_leakage_coefficient: undefined\ninstrument_accompaniment_gain: undefined\n";
-        }
+        std::cout << "cancelled_instrument_vs_accompaniment_sdr_db: " << sdrDb(accompaniment, cancelled, count)
+                  << "\ncancel_hop_mean_us: " << std::accumulate(cancelUs.begin(), cancelUs.end(), 0.0) / cancelUs.size() << '\n';
+        fit("cancelled_instrument", cancelled);
         std::cout << "mix_fit_note: 2x2 least-squares diagnostic; not a standalone quality score\n";
     }
     return 0;

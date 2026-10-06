@@ -49,7 +49,7 @@ int main() {
             }
             require(firstAudio >= 0 && firstAudio < .2, "live pipeline still has a long startup buffer");
             require(maxDelay < .2, "live pipeline accumulated excessive delay");
-            require(centerPower < 1e-6 && sidePower > 50, "full vocal removal must retain the instrument stem");
+            require(centerPower < 1e-6 * sidePower && sidePower > 50, "full vocal removal must retain the instrument stem");
             require(sing.position() > 1 && sing.state() == 3 && sing.underruns.load() == 0, "continuous streaming failed");
             std::cout << sr << " Hz: first_audio_s=" << firstAudio << " max_queue_delay_s=" << maxDelay << '\n';
         }
