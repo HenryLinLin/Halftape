@@ -2,7 +2,6 @@
 #include "audio.hpp"
 #include "realtime.hpp"
 #include "streaming.hpp"
-#include "vocal_cancel.hpp"
 #include "signalsmith-stretch.h"
 #include <chrono>
 #include <semaphore>
@@ -15,7 +14,6 @@ class Sing {
     Spsc<SingInput, 65536> input;
     Spsc<SingFrame, 16384> ready;
     std::unique_ptr<LiveSeparator> separator;
-    VocalCanceller canceller;
     std::thread worker;
     std::counting_semaphore<> wake{0};
     std::mutex errorMutex;

@@ -36,13 +36,13 @@ void Sing::run() {
         r8b::CDSPResampler leftSRC(sourceRate, rate, 256, 4., 180.15, r8b::fprMinPhase);
         r8b::CDSPResampler rightSRC(sourceRate, rate, 256, 4., 180.15, r8b::fprMinPhase);
         std::array<double, 256> l{}, r{};
-        LiveBlock hop{}, mix{}, vocals{}, delayed{}, accompaniment{}; LiveStems stems{};
+        LiveBlock hop{}; LiveStems stems{};
         unsigned fill = 0;
         uint64_t expected = 0, origin = 0, resampled = 0, generation = 0;
         unsigned overruns = 0;
         auto lastOverrun = std::chrono::steady_clock::time_point{};
         auto reset = [&](uint64_t at) {
-            separator->reset(); canceller.reset(); leftSRC.clear(); rightSRC.clear(); fill = 0; origin = at; resampled = 0;
+            separator->reset(); leftSRC.clear(); rightSRC.clear(); fill = 0; origin = at; resampled = 0;
             generation = epoch.fetch_add(1) + 1;
         };
         auto processSample = [&](float a, float b) {
@@ -53,14 +53,6 @@ void Sing::run() {
             timespec cpuStart{}, cpuEnd{};
             clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpuStart);
             bool valid = separator->process(hop, stems);
-            if (valid) {
-                for (unsigned i = 0; i < liveHop; ++i) {
-                    mix[i] = {};
-                    for (auto& stem : stems) { mix[i].l += stem[i].l; mix[i].r += stem[i].r; }
-                    vocals[i] = stems[2][i];
-                }
-                valid = canceller.process(mix, vocals, delayed, accompaniment);
-            }
             clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpuEnd);
             double cpu = cpuEnd.tv_sec - cpuStart.tv_sec + (cpuEnd.tv_nsec - cpuStart.tv_nsec) * 1e-9;
             cpuRtf.store(.95 * cpuRtf.load() + .05 * cpu * rate / liveHop);
@@ -69,11 +61,12 @@ void Sing::run() {
             double factor = elapsed * rate / liveHop;
             rtf.store(.95 * rtf.load() + .05 * factor);
             if (!valid) return;
-            auto first = resampled - 2 * liveHop - VocalCanceller::latency;
+            auto first = resampled - 2 * liveHop;
             for (unsigned i = 0; i < liveHop; ++i) {
+                Frame mix{};
+                for (auto& stem : stems) { mix.l += stem[i].l; mix.r += stem[i].r; }
                 auto position = origin + uint64_t(double(first + i + 1) * sourceRate / rate);
-                auto& m = delayed[i];
-                SingFrame frame{m.l, m.r, m.l - accompaniment[i].l, m.r - accompaniment[i].r, position, generation};
+                SingFrame frame{mix.l, mix.r, stems[2][i].l, stems[2][i].r, position, generation};
                 while (!ready.push(frame) && !quit.load()) std::this_thread::sleep_for(std::chrono::microseconds(250));
             }
             queued.store(unsigned(ready.size()));
