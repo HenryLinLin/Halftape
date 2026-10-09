@@ -58,6 +58,8 @@ private func cString<T>(_ bytes: T) -> String {
     @Published var modelSix = UserDefaults.standard.string(forKey: "modelSix") ?? ""
     @Published var modelFour = UserDefaults.standard.string(forKey: "modelFour") ?? ""
     @Published var modelSing = UserDefaults.standard.string(forKey: "modelSing") ?? ""
+    @Published var modelClean = UserDefaults.standard.string(forKey: "modelClean") ?? ""
+    @Published var singClean = UserDefaults.standard.object(forKey: "singClean") as? Bool ?? true
     @Published var gains = Array(repeating: 1.0, count: 6)
     @Published var mutes = Array(repeating: false, count: 6)
     @Published var solos = Array(repeating: false, count: 6)
@@ -156,17 +158,23 @@ private func cString<T>(_ bytes: T) -> String {
         let p = NSOpenPanel()
         p.allowedContentTypes = [UTType(filenameExtension: "onnx") ?? .data]
         p.allowsMultipleSelection = false
-        p.message = "Choose the StemGenRT hop-128 ONNX model"
+        p.message = singClean ? "Choose the clean Sing model (umxl-vocals.onnx)" : "Choose the StemGenRT hop-128 ONNX model"
         p.begin { [weak self] response in guard response == .OK, let path = p.url?.path else { return }
             Task { @MainActor in
-                self?.modelSing = path
-                UserDefaults.standard.set(path, forKey: "modelSing")
-                self?.setSingModel()
+                guard let self else { return }
+                if self.singClean { self.modelClean = path; UserDefaults.standard.set(path, forKey: "modelClean") }
+                else { self.modelSing = path; UserDefaults.standard.set(path, forKey: "modelSing") }
+                self.setSingModel()
             }
         }
     }
+    func setSingMode(_ clean: Bool) {
+        guard status.sing == 0 else { return }
+        singClean = clean; UserDefaults.standard.set(clean, forKey: "singClean")
+        setSingModel(); poll()
+    }
     func setModels() { modelSix.withCString { a in modelFour.withCString { b in ws_set_model(ws, a, b) } } }
-    func setSingModel() { modelSing.withCString { ws_set_sing_model(ws, $0) } }
+    func setSingModel() { (singClean ? modelClean : modelSing).withCString { ws_set_sing_model(ws, $0) } }
     private func discoverModelsIfNeeded() {
         let fileManager = FileManager.default
         var folders: [URL] = []
@@ -190,6 +198,10 @@ private func cString<T>(_ bytes: T) -> String {
         if !usable(modelSing) {
             modelSing = folders.map { $0.appendingPathComponent("stemgenrt-hop128.onnx").path }.first(where: usable) ?? ""
             UserDefaults.standard.set(modelSing, forKey: "modelSing")
+        }
+        if !usable(modelClean) {
+            modelClean = folders.map { $0.appendingPathComponent("umxl-vocals.onnx").path }.first(where: usable) ?? ""
+            UserDefaults.standard.set(modelClean, forKey: "modelClean")
         }
         if !usable(modelFour) {
             modelFour = folders.map { $0.appendingPathComponent("htdemucs.onnx").path }.first(where: usable) ?? ""
@@ -413,7 +425,7 @@ struct PracticeView: View {
         GroupBox("Models") {
             VStack(alignment:.leading,spacing:8) {
                 Button { m.modelPicker(six:true) } label: { modelLabel("6-stem",path:m.modelSix) }.buttonStyle(.plain)
-                Button { m.singModelPicker() } label: { modelLabel("Sing · StemGenRT",path:m.modelSing) }.buttonStyle(.plain).help("Choose StemGenRT hop-128 ONNX model")
+                Button { m.singModelPicker() } label: { modelLabel(m.singClean ? "Sing · UMX-L" : "Sing · StemGenRT",path:m.singClean ? m.modelClean : m.modelSing) }.buttonStyle(.plain).help(m.singClean ? "Choose the clean Sing model" : "Choose StemGenRT hop-128 ONNX model")
                 Text("Live Sing streams vocals and accompaniment; separation may leave some vocals.").font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth:.infinity,alignment:.leading)
         }
@@ -468,9 +480,13 @@ struct LiveSingControls: View {
     }
     var body: some View { VStack(alignment:.leading,spacing:12) {
         HStack { Label("Live Sing",systemImage:"mic.fill").font(.headline); Spacer(); Text(stateLabel).font(.caption).foregroundStyle(.secondary) }
+        Picker("Mode", selection: Binding(get: { m.singClean }, set: { m.setSingMode($0) })) {
+            Text("Clean · about 0.25 s").tag(true)
+            Text("Low latency").tag(false)
+        }.pickerStyle(.segmented).disabled(m.status.sing != 0)
         if m.status.sing == 0 {
             if m.status.sing_model_ready == 0 {
-                Text("Choose the StemGenRT hop-128 ONNX model to enable Live Sing.").font(.caption).foregroundStyle(.secondary)
+                Text(m.singClean ? "Run scripts/sing-clean-model.sh or choose umxl-vocals.onnx to enable clean Sing." : "Choose the StemGenRT hop-128 ONNX model to enable Live Sing.").font(.caption).foregroundStyle(.secondary)
                 Button("Choose Sing Model…") { m.singModelPicker() }
             } else {
                 Text(m.capturing ? "Play audio in \(m.capturedSourceName), then click Start Sing." : "Choose a source and click Start Capture in the main window before starting Sing.").font(.caption).foregroundStyle(.secondary)
@@ -503,7 +519,7 @@ struct LiveSingControls: View {
         Text("To skip or pause live audio, use the source app. Use the clip for looping and individual stem controls.").font(.caption).foregroundStyle(.secondary)
         HStack { Button(m.status.sing == 0 ? "Start Sing" : "Stop Sing") { m.toggleSing() }.buttonStyle(.borderedProminent).disabled(m.status.sing == 0 && (!m.capturing || m.status.sing_model_ready == 0)); Spacer(); if showsReturnToClip { Button("Return to Clip") { ws_play(m.ws,1); m.poll() }.disabled(m.status.duration < 0.1) } }
     }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:10)) }
-    var qualityName:String { m.status.sing == 0 ? "Stopped" : "StemGenRT" }
+    var qualityName:String { m.status.sing == 0 ? "Stopped" : (m.singClean ? "UMX-L (clean)" : "StemGenRT") }
 }
 
 private struct FloatingLevelAccessor: NSViewRepresentable {

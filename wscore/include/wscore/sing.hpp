@@ -32,7 +32,7 @@ class Sing {
     unsigned sourceRate;
     void run();
 public:
-    static constexpr unsigned targetFrames = 4096;
+    const unsigned targetFrames;
     std::atomic<float> removal{1}, pitch{0};
     std::atomic<int> quality{3};
     std::atomic<double> rtf{0};

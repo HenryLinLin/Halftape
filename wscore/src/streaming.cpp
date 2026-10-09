@@ -3,6 +3,8 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <thread>
+#include <pthread.h>
 #ifdef WS_ONNX
 #define ACCELERATE_NEW_LAPACK
 #include <onnxruntime_cxx_api.h>
@@ -10,6 +12,18 @@
 #endif
 
 namespace ws {
+[[maybe_unused]] static const char* stemgenrt = "77164d6a581fafb2a31f53fd8ffde44c07cf618472952a4cdba14e68dda3b8b9";
+[[maybe_unused]] static std::string digest(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("Choose a Sing model. Run scripts/sing-clean-model.sh or scripts/sing-model.sh.");
+    CC_SHA256_CTX hash; CC_SHA256_Init(&hash);
+    std::array<char, 65536> bytes{};
+    while (file.read(bytes.data(), bytes.size()) || file.gcount()) CC_SHA256_Update(&hash, bytes.data(), CC_LONG(file.gcount()));
+    unsigned char sum[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(sum, &hash);
+    std::ostringstream hex;
+    for (auto c : sum) hex << std::hex << std::setfill('0') << std::setw(2) << unsigned(c);
+    return hex.str();
+}
 #ifdef WS_ONNX
 struct StreamingSeparator::Impl {
     LiveDftOp<float> fft; LiveDftOp<double> fftDouble;
@@ -27,15 +41,7 @@ struct StreamingSeparator::Impl {
     bool pending = false;
 
     explicit Impl(const std::string& path) {
-        std::ifstream file(path, std::ios::binary);
-        if (!file) throw std::runtime_error("Choose the streaming Sing model or run scripts/sing-model.sh.");
-        CC_SHA256_CTX hash; CC_SHA256_Init(&hash);
-        std::array<char, 65536> bytes{};
-        while (file.read(bytes.data(), bytes.size()) || file.gcount()) CC_SHA256_Update(&hash, bytes.data(), CC_LONG(file.gcount()));
-        unsigned char digest[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(digest, &hash);
-        std::ostringstream hex;
-        for (auto c : digest) hex << std::hex << std::setfill('0') << std::setw(2) << unsigned(c);
-        if (hex.str() != "77164d6a581fafb2a31f53fd8ffde44c07cf618472952a4cdba14e68dda3b8b9")
+        if (digest(path) != stemgenrt)
             throw std::runtime_error("Unsupported streaming model. Download the supported model with scripts/sing-model.sh.");
         Ort::SessionOptions options;
         math.Add(&fft); math.Add(&fftDouble); math.Add(&mat); math.Add(&matDouble); options.Add(math);
@@ -90,11 +96,71 @@ bool StreamingSeparator::process(const LiveBlock& input, LiveStems& output) {
         bool valid = impl->pending; impl->pending = true; return valid;
     } catch (...) { reset(); throw; }
 }
+#ifdef __APPLE__
+static OrtCustomThreadHandle interactiveThread(void*, OrtThreadWorkerFn work, void* param) {
+    auto* thread = new std::thread([work, param] { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); work(param); });
+    return reinterpret_cast<OrtCustomThreadHandle>(thread);
+}
+static void joinThread(OrtCustomThreadHandle handle) {
+    auto* thread = reinterpret_cast<std::thread*>(const_cast<OrtCustomHandleType*>(handle));
+    thread->join(); delete thread;
+}
+#endif
+struct UmxSeparator::Impl {
+    Ort::Env env{ORT_LOGGING_LEVEL_ERROR, "Halftape Clean Sing"};
+    std::unique_ptr<Ort::Session> session;
+    Ort::RunOptions run;
+    Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    std::vector<int64_t> shape;
+    std::string input, output;
+    unsigned frames = 0;
+    explicit Impl(const std::string& path) {
+        Ort::SessionOptions options;
+        options.SetIntraOpNumThreads(2); options.SetInterOpNumThreads(1);
+        options.SetExecutionMode(ORT_SEQUENTIAL);
+        options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+#ifdef __APPLE__
+        options.SetCustomCreateThreadFn(interactiveThread); options.SetCustomJoinThreadFn(joinThread);
+#endif
+        session = std::make_unique<Ort::Session>(env, path.c_str(), options);
+        constexpr const char* unsupported = "Unsupported Sing model. Run scripts/sing-model.sh or scripts/sing-clean-model.sh.";
+        if (session->GetInputCount() != 1 || session->GetOutputCount() != 1) throw std::runtime_error(unsupported);
+        Ort::AllocatorWithDefaultOptions allocator;
+        input = session->GetInputNameAllocated(0, allocator).get(); output = session->GetOutputNameAllocated(0, allocator).get();
+        auto inType = session->GetInputTypeInfo(0), outType = session->GetOutputTypeInfo(0);
+        auto in = inType.GetTensorTypeAndShapeInfo(), out = outType.GetTensorTypeAndShapeInfo();
+        shape = in.GetShape();
+        if (input != "mag" || shape.size() != 4 || shape[0] != 1 || shape[1] != 2 || shape[2] != MaskSeparator::bins || shape[3] < 4 ||
+            out.GetShape() != shape || in.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || out.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+            throw std::runtime_error(unsupported);
+        frames = unsigned(shape[3]);
+    }
+};
+UmxSeparator::UmxSeparator(const std::string& path) : UmxSeparator(std::make_unique<Impl>(path)) {}
+UmxSeparator::UmxSeparator(std::unique_ptr<Impl> loaded) : MaskSeparator(loaded->frames), impl(std::move(loaded)) {}
+UmxSeparator::~UmxSeparator() = default;
+void UmxSeparator::estimate(const std::vector<float>& mixture, std::vector<float>& vocals) {
+    auto in = Ort::Value::CreateTensor<float>(impl->memory, const_cast<float*>(mixture.data()), mixture.size(), impl->shape.data(), impl->shape.size());
+    auto out = Ort::Value::CreateTensor<float>(impl->memory, vocals.data(), vocals.size(), impl->shape.data(), impl->shape.size());
+    const char* inputs[]{impl->input.c_str()}; const char* outputs[]{impl->output.c_str()};
+    impl->session->Run(impl->run, inputs, &in, 1, outputs, &out, 1);
+    for (float& x : vocals) if (!std::isfinite(x)) throw std::runtime_error("Invalid Sing model output");
+}
+std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path) {
+    if (digest(path) == stemgenrt) return std::make_unique<StreamingSeparator>(path);
+    return std::make_unique<UmxSeparator>(path);
+}
 #else
 struct StreamingSeparator::Impl {};
 StreamingSeparator::StreamingSeparator(const std::string&) { throw std::runtime_error("Streaming Sing requires ONNX Runtime."); }
 StreamingSeparator::~StreamingSeparator() = default;
 void StreamingSeparator::reset() {}
 bool StreamingSeparator::process(const LiveBlock&, LiveStems&) { return false; }
+struct UmxSeparator::Impl { unsigned frames = 0; };
+UmxSeparator::UmxSeparator(const std::string&) : UmxSeparator(std::make_unique<Impl>()) {}
+UmxSeparator::UmxSeparator(std::unique_ptr<Impl> loaded) : MaskSeparator(loaded->frames), impl(std::move(loaded)) {}
+UmxSeparator::~UmxSeparator() = default;
+void UmxSeparator::estimate(const std::vector<float>&, std::vector<float>&) {}
+std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path) { return std::make_unique<StreamingSeparator>(path); }
 #endif
 }

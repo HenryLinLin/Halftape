@@ -20,4 +20,6 @@ Model files are downloaded or selected separately and are not included in the ap
 
 The `htdemucs` and `htdemucs_6s` files downloaded by `scripts/models.sh` are pretrained Demucs weights, converted to ONNX by [StemSplit](https://huggingface.co/StemSplitio/htdemucs-6s-onnx). The upstream [pretrained-weight discussion](https://github.com/facebookresearch/demucs/issues/327) describes scientific-use terms. The software's MIT license does not establish a separate redistribution grant for the weights.
 
+Clean Sing's `umxl-vocals.onnx` is generated locally by `scripts/sing-clean-model.sh` from the Open-Unmix UMX-L vocals checkpoint hosted at [Zenodo record 5069601](https://zenodo.org/records/5069601). The script identifies the checkpoint weights as [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) and verifies their SHA-256 before conversion.
+
 Low latency Sing downloads `model/model.onnx` from the pinned [StemGenRT revision](https://github.com/sweetspotsoundsystem/stemgen-rt/tree/61df8f4aa1555ef110308d01ea92b54ace770979) and verifies its SHA-256. The upstream repository includes an MIT license for its software; that license does not separately identify terms for this trained model artifact.

@@ -275,7 +275,7 @@ void Session::setSing(bool enabled) {
         return;
     }
     if (!source || captureStop.load()) throw std::runtime_error("Click Start Capture before starting Sing.");
-    if (!singModelReady) throw std::runtime_error("Choose the streaming Sing model first. Download it with scripts/sing-model.sh.");
+    if (!singModelReady) throw std::runtime_error("Choose a Sing model first. Run scripts/sing-clean-model.sh or scripts/sing-model.sh.");
     auto sampleRate = capture->sample_rate();
     auto nextSing = std::make_unique<Sing>(sampleRate, singPath);
     ++generation; busy.store(false);

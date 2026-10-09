@@ -3,8 +3,10 @@
 #include <pthread.h>
 
 namespace ws {
-Sing::Sing(unsigned sampleRate, const std::string& model) : Sing(sampleRate, std::make_unique<StreamingSeparator>(model)) {}
-Sing::Sing(unsigned sampleRate, std::unique_ptr<LiveSeparator> processor) : separator(std::move(processor)), sourceRate(sampleRate) {
+Sing::Sing(unsigned sampleRate, const std::string& model) : Sing(sampleRate, openLiveSeparator(model)) {}
+// Block separators pause the worker for each model run, so they get one more hop of cushion.
+Sing::Sing(unsigned sampleRate, std::unique_ptr<LiveSeparator> processor)
+    : separator(std::move(processor)), sourceRate(sampleRate), targetFrames(separator && separator->latency() > 4 * liveHop ? 5120 : 4096) {
     if (sampleRate < 8000 || sampleRate > 192000 || !separator) throw std::runtime_error("Unsupported live audio format");
     stretch.presetDefault(2, rate);
     worker = std::thread([this] { run(); });
@@ -61,7 +63,7 @@ void Sing::run() {
             double factor = elapsed * rate / liveHop;
             rtf.store(.95 * rtf.load() + .05 * factor);
             if (!valid) return;
-            auto first = resampled - 2 * liveHop;
+            auto first = resampled - separator->latency();
             for (unsigned i = 0; i < liveHop; ++i) {
                 Frame mix{};
                 for (auto& stem : stems) { mix.l += stem[i].l; mix.r += stem[i].r; }

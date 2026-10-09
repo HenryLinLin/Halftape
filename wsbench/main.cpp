@@ -50,7 +50,7 @@ int stream(const std::string& modelPath, const std::string& mixturePath,
     if (!frames) throw std::runtime_error("empty audio");
 
     const auto loadStart = std::chrono::steady_clock::now();
-    ws::StreamingSeparator separator(modelPath);
+    auto separator = ws::openLiveSeparator(modelPath);
     const double loadSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - loadStart).count();
 
     const size_t hops = (frames + ws::liveHop - 1) / ws::liveHop;
@@ -74,13 +74,15 @@ int stream(const std::string& modelPath, const std::string& mixturePath,
             if (source < frames) input[i] = {mixture[0][source], mixture[1][source]};
         }
         const auto hopStart = std::chrono::steady_clock::now();
-        if (separator.process(input, output)) append(output);
+        if (separator->process(input, output)) append(output);
         hopMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hopStart).count());
     }
     ws::LiveBlock zero{};
-    const auto flushStart = std::chrono::steady_clock::now();
-    if (separator.process(zero, output)) append(output);
-    hopMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - flushStart).count());
+    for (unsigned flushed = 0; flushed + 2 * ws::liveHop <= separator->latency(); flushed += ws::liveHop) {
+        const auto flushStart = std::chrono::steady_clock::now();
+        if (separator->process(zero, output)) append(output);
+        hopMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - flushStart).count());
+    }
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
     // Discard the pre-roll result, then trim the flush-padded output to the source length.
