@@ -14,12 +14,16 @@ Halftape uses the following third-party components. Their notices and license te
 
 The MIT license texts for vendored components are in `.deps/`. Eigen's MPL-2.0 text is in `.deps/demucs/vendor/eigen/COPYING.MPL2`.
 
-## Model files
+## Models and music
 
-Model files are downloaded or selected separately and are not included in the app bundle.
+Halftape is a free personal practice project, with no plans for monetization. Model files are downloaded or selected separately; neither the original weights nor locally converted models are included in the app bundle or releases. Their licenses are separate from Halftape's code license.
 
-The `htdemucs` and `htdemucs_6s` files downloaded by `scripts/models.sh` are pretrained Demucs weights, converted to ONNX by [StemSplit](https://huggingface.co/StemSplitio/htdemucs-6s-onnx). The upstream [pretrained-weight discussion](https://github.com/facebookresearch/demucs/issues/327) describes scientific-use terms. The software's MIT license does not establish a separate redistribution grant for the weights.
+**Clean Sing** uses UMX-L by Fabian-Robert Stöter and Antoine Liutkus ([original model](https://zenodo.org/records/5069601)), licensed [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Halftape uses it only non-commercially. The script converts it to ONNX locally without retraining, and Halftape does not distribute the converted model.
 
-Clean Sing's `umxl-vocals.onnx` is generated locally by `scripts/sing-clean-model.sh` from the Open-Unmix UMX-L vocals checkpoint hosted at [Zenodo record 5069601](https://zenodo.org/records/5069601). The script identifies the checkpoint weights as [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) and verifies their SHA-256 before conversion.
+**Practice** uses [Demucs weights converted by StemSplit](https://huggingface.co/StemSplitio/htdemucs-6s-onnx). The original Demucs weights were released for research use; see the [upstream discussion](https://github.com/facebookresearch/demucs/issues/327).
 
-Low latency Sing downloads `model/model.onnx` from the pinned [StemGenRT revision](https://github.com/sweetspotsoundsystem/stemgen-rt/tree/61df8f4aa1555ef110308d01ea92b54ace770979) and verifies its SHA-256. The upstream repository includes an MIT license for its software; that license does not separately identify terms for this trained model artifact.
+**Low latency Sing** uses the model published by the [StemGenRT project](https://github.com/sweetspotsoundsystem/stemgen-rt/tree/61df8f4aa1555ef110308d01ea92b54ace770979). The project's code is MIT-licensed; the model has no separately stated license.
+
+[MUSDB excerpts](https://github.com/sigsep/sigsep-mus-db#getting-the-data) were used for local separation tests and are not distributed. Halftape includes no songs, keeps practice clips only for the current session, and has no audio export.
+
+If a rights holder raises a concern about a model or material used by Halftape, I will remove the affected integration or material while the concern is reviewed.
