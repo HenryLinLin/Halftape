@@ -33,7 +33,7 @@ class Sing {
     unsigned sourceRate;
     void run();
 public:
-    std::atomic<unsigned> targetFrames{2048}, minimumTarget{1024};
+    std::atomic<unsigned> targetFrames{4096}, minimumTarget{1024};
     std::atomic<float> silenceSeconds{.15f};
     std::atomic<float> removal{1}, pitch{0};
     std::atomic<int> quality{3};

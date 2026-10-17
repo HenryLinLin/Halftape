@@ -98,7 +98,7 @@ int main() {
             if (sing.underruns.load() || sing.dropped.load())
                 std::cerr << sr << " Hz: underruns=" << sing.underruns.load() << " dropped=" << sing.dropped.load() << " max_hop_ms=" << 1000 * sing.maxHopSeconds.load() << '\n';
             require(sing.underruns.load() == 0 && sing.dropped.load() == 0, "clean Sing must keep up with model compute");
-            require(maxDelay < .25, "clean Sing delay must stay under 0.25 s");
+            require(maxDelay < .3, "clean Sing delay must stay under 0.3 s while the start cushion shrinks");
             require(center < 1e-4 * side && side > 50, "clean Sing must remove the vocal and keep the backing");
             std::cout << sr << " Hz: clean_sing_delay_s=" << maxDelay << '\n';
         }

@@ -25,6 +25,8 @@ Sing::Sing(unsigned sampleRate, const std::string& model) : Sing(sampleRate, ope
 Sing::Sing(unsigned sampleRate, std::unique_ptr<LiveSeparator> processor)
     : separator(std::move(processor)), sourceRate(sampleRate) {
     if (sampleRate < 8000 || sampleRate > 192000 || !separator) throw std::runtime_error("Unsupported live audio format");
+    // Block separators pause the worker for each model run, so they start with one more hop of cushion.
+    targetFrames.store(separator->latency() > 4 * liveHop ? 5120 : 4096);
     stretch.presetDefault(2, rate);
     worker = std::thread([this] { run(); });
 }
@@ -60,7 +62,8 @@ void Sing::run() {
         unsigned fill = 0;
         uint64_t expected = 0, origin = 0, resampled = 0, generation = 0, flushedAt = 0;
         unsigned overruns = 0, windowHops = 0, slowWindows = 0;
-        double worst = 0, previousWorst = 0, windowSeconds = 0;
+        double worst = 0, previousWorst = 0, windowSeconds = 0, ceiling = targetFrames.load();
+        uint64_t backlog = 0, previousBacklog = 0;
         bool flushed = false, relaxPending = false;
         auto lastOverrun = std::chrono::steady_clock::time_point{};
         auto relax = [&] {
@@ -92,15 +95,20 @@ void Sing::run() {
                 slowWindows = windowSeconds > 1.0 ? slowWindows + 1 : 0;
                 if (slowWindows >= 2) relax();
                 windowHops = 0; previousWorst = worst; worst = 0; windowSeconds = 0;
+                previousBacklog = backlog; backlog = 0;
+                ceiling *= .75;
                 boost.store(boost.load() * 9 / 10);
                 // Ask for at most half of each period so a slow run never trips the scheduler's overrun failsafe.
                 double period = hopSeconds * std::ceil(std::max(1., 4 * previousWorst / hopSeconds));
                 realtimePolicy(period, std::min(2 * previousWorst, .5 * period));
             }
-            // The cushion covers the slowest recent model run plus one output block; underruns add a decaying boost.
+            // The cushion covers the slowest recent model run, the longest the worker recently waited for input,
+            // and one output block; underruns add a decaying boost, and the starting size shrinks toward it.
             double slowest = std::max(worst, previousWorst);
-            unsigned cushion = unsigned(slowest * rate * 1.5) + 512 + liveHop + boost.load();
-            targetFrames.store(std::clamp(cushion, std::min(minimumTarget.load(), 8192u), 8192u));
+            double lateness = double(std::max(backlog, previousBacklog)) * rate / sourceRate;
+            double cushion = slowest * rate * 1.5 + lateness + 512 + liveHop + boost.load();
+            auto target = unsigned(std::max(cushion, ceiling));
+            targetFrames.store(std::clamp(target, std::min(minimumTarget.load(), 8192u), 8192u));
             if (!valid) return;
             auto first = resampled - separator->latency();
             for (unsigned i = 0; i < liveHop; ++i) {
@@ -123,6 +131,7 @@ void Sing::run() {
             if (flushed && audible != flushedAt) flushed = false;
             if (!flushed && (stalled || silent)) { flushed = true; flushedAt = audible; reset(expected); }
             if (relaxPending) { relaxPending = false; reset(expected); }
+            backlog = std::max<uint64_t>(backlog, input.size());
             SingInput frame;
             if (input.size() > sourceRate / 4) {
                 auto now = std::chrono::steady_clock::now();
