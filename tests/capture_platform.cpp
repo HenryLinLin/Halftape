@@ -23,7 +23,8 @@ struct Output::Impl {};
 
 Tap::Tap() : impl(std::make_unique<Impl>()) {}
 Tap::~Tap() = default;
-double Tap::start(uint32_t source, bool muted) {
+double Tap::latency() const { return 0; }
+double Tap::start(uint32_t source, bool muted, Feed feed, void* context) {
     if (source != 42 && source != 43) throw std::runtime_error("unknown mock source");
     ++mock_tap_starts;
     mock_tap_muted = muted;
@@ -35,6 +36,7 @@ double Tap::start(uint32_t source, bool muted) {
             ? std::numeric_limits<float>::quiet_NaN()
             : .4f * std::sin(float(2.0 * pi * 440.0 * i / 44100.0));
         if (!queue.push({tone, tone})) throw std::runtime_error("mock capture queue overflow");
+        if (feed) feed(context, {tone, tone});
     }
     return 44100.;
 }
@@ -47,6 +49,7 @@ void Tap::stop() {
 
 Output::Output() : impl(std::make_unique<Impl>()) {}
 Output::~Output() = default;
+double Output::latency() const { return 0; }
 void Output::start(Render render, void* context, bool) {
     active_render = render;
     active_context = context;

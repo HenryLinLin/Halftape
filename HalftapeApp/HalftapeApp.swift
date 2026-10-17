@@ -484,6 +484,9 @@ struct LiveSingControls: View {
             Text("Clean · about 0.25 s").tag(true)
             Text("Low latency").tag(false)
         }.pickerStyle(.segmented).disabled(m.status.sing != 0)
+        if m.lowPowerMode {
+            Label("Low Power Mode is on. Clean Sing may fall behind on some Macs. If it stutters, turn it off in System Settings under Battery, or use Low latency.", systemImage: "battery.25percent").font(.caption).foregroundStyle(.orange)
+        }
         if m.status.sing == 0 {
             if m.status.sing_model_ready == 0 {
                 Text(m.singClean ? "Run scripts/sing-clean-model.sh or choose umxl-vocals.onnx to enable clean Sing." : "Choose the StemGenRT hop-128 ONNX model to enable Live Sing.").font(.caption).foregroundStyle(.secondary)
@@ -493,15 +496,12 @@ struct LiveSingControls: View {
             }
         } else {
             Text("Source: \(m.capturedSourceName)").font(.subheadline)
-            if m.lowPowerMode {
-                Text("Low Power Mode can make live separation fall behind.").font(.caption).foregroundStyle(.secondary)
-            }
             if m.status.sing_state == 1 || m.status.sing_state == 2 {
                 HStack { ProgressView().controlSize(.small); Text(stateLabel); Spacer(); Text(String(format:"%.0f ms buffered",m.status.sing_buffered * 1000)) }.font(.caption).foregroundStyle(.secondary)
             } else if m.status.sing_state == 4 {
                 HStack { ProgressView().controlSize(.small); Text("Waiting for audio from \(m.capturedSourceName)…") }.font(.caption).foregroundStyle(.secondary)
             } else if m.status.sing_state == 3 {
-                Label(String(format:"Processing estimate · %.0f ms",m.status.sing_latency * 1000),systemImage:"clock").font(.caption).foregroundStyle(.secondary)
+                Label(String(format:"Delay · %.0f ms, of which %.0f ms is the audio device",m.status.sing_latency * 1000,m.status.device_latency * 1000),systemImage:"clock").font(.caption).foregroundStyle(.secondary)
                 Text("Transpose can add a little extra delay.").font(.caption).foregroundStyle(.secondary)
                 Text(String(format:"%.1f s played",m.status.sing_position)).font(.system(.caption,design:.monospaced)).foregroundStyle(.secondary)
             }

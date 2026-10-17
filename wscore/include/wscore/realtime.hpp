@@ -4,3 +4,6 @@
 #else
 #define WS_REALTIME
 #endif
+namespace ws {
+void realtimePolicy(double periodSeconds, double computationSeconds) noexcept;
+}

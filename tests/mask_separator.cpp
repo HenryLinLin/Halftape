@@ -17,7 +17,7 @@ class BandSeparator final : public ws::MaskSeparator {
         }
     }
 public:
-    BandSeparator(float lo, float hi) : MaskSeparator(32), low(lo), high(hi) {}
+    BandSeparator(float lo, float hi, unsigned lookahead = 2) : MaskSeparator(32, lookahead), low(lo), high(hi) {}
 };
 
 static double run(BandSeparator& separator, double vocalHz, double backingHz, double& vocalLeft, double& backingKept) {
@@ -66,6 +66,16 @@ int main() {
         double again = run(band, 440, 1000, left, kept);
         require(again < 1e-4 && left < -40 && band.starved == 0, "reset must restart the stream cleanly");
         std::cout << "latency_ms=" << 1000. * band.latency() / ws::rate << " vocal_left_db=" << left << " backing_snr_db=" << kept << '\n';
+        require(band.relax() && !band.relax() && band.stride() == 1, "relax must be a one-way switch that waits for reset");
+        band.reset();
+        require(band.stride() == 2 && band.latency() == 3 * 1024 + 4 * 1024, "the relaxed stride must take effect at reset with the longer delay");
+        require(run(band, 440, 1000, left, kept) < 1e-4 && left < -40 && kept > 30 && band.starved == 0, "the relaxed stride must stay aligned");
+        for (unsigned lookahead : {0u, 1u}) {
+            BandSeparator shorter(380, 500, lookahead);
+            double shortLeft, shortKept;
+            require(run(shorter, 440, 1000, shortLeft, shortKept) < 1e-4 && shortLeft < -40 && shortKept > 30 && shorter.starved == 0, "shorter lookahead must keep the stream aligned");
+            std::cout << "lookahead=" << lookahead << " latency_ms=" << 1000. * shorter.latency() / ws::rate << '\n';
+        }
         for (unsigned sr : {44100u, 48000u}) {
             ws::Sing sing(sr, std::make_unique<BandSeparator>(380, 500));
             float l[256], r[256];
@@ -88,7 +98,7 @@ int main() {
             if (sing.underruns.load() || sing.dropped.load())
                 std::cerr << sr << " Hz: underruns=" << sing.underruns.load() << " dropped=" << sing.dropped.load() << " max_hop_ms=" << 1000 * sing.maxHopSeconds.load() << '\n';
             require(sing.underruns.load() == 0 && sing.dropped.load() == 0, "clean Sing must keep up with model compute");
-            require(maxDelay < .3, "clean Sing delay must stay under 0.3 s");
+            require(maxDelay < .25, "clean Sing delay must stay under 0.25 s");
             require(center < 1e-4 * side && side > 50, "clean Sing must remove the vocal and keep the backing");
             std::cout << sr << " Hz: clean_sing_delay_s=" << maxDelay << '\n';
         }

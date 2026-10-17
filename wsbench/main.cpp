@@ -21,7 +21,7 @@ void help() {
                  "  wsbench --version\n"
                  "  wsbench inspect file.wav\n"
                  "  wsbench separate model.bin 4|6 file.wav\n"
-                 "  wsbench stream model.onnx mixture.wav [vocals.wav accompaniment.wav]\n"
+                 "  wsbench stream model.onnx mixture.wav [vocals.wav accompaniment.wav] [lookahead]\n"
                  "  wsbench live model.onnx mixture.wav [seconds]\n"
                  "  wsbench sdr reference.wav estimate.wav\n";
 }
@@ -44,13 +44,13 @@ double sdrDb(const ws::Stereo& reference, const ws::Stereo& estimate, size_t fra
 }
 
 int stream(const std::string& modelPath, const std::string& mixturePath,
-           const std::string* vocalsPath, const std::string* accompanimentPath) {
+           const std::string* vocalsPath, const std::string* accompanimentPath, unsigned lookahead) {
     auto mixture = readAtRate(mixturePath);
     const size_t frames = mixture[0].size();
     if (!frames) throw std::runtime_error("empty audio");
 
     const auto loadStart = std::chrono::steady_clock::now();
-    auto separator = ws::openLiveSeparator(modelPath);
+    auto separator = ws::openLiveSeparator(modelPath, lookahead);
     const double loadSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - loadStart).count();
 
     const size_t hops = (frames + ws::liveHop - 1) / ws::liveHop;
@@ -290,10 +290,12 @@ int main(int argc, char** argv) {
                       << "\nreconstruction_sdr_db: " << 10 * std::log10((power + 1e-30) / (error + 1e-30)) << '\n';
             return 0;
         }
-        if ((argc == 4 || argc == 6) && std::string(argv[1]) == "stream") {
-            if (argc == 4) return stream(argv[2], argv[3], nullptr, nullptr);
+        if (argc >= 4 && argc <= 7 && std::string(argv[1]) == "stream") {
+            const bool hasLookahead = argc == 5 || argc == 7;
+            const unsigned lookahead = hasLookahead ? unsigned(std::stoul(argv[argc - 1])) : 2;
+            if (argc <= 5) return stream(argv[2], argv[3], nullptr, nullptr, lookahead);
             const std::string vocalsPath = argv[4], accompanimentPath = argv[5];
-            return stream(argv[2], argv[3], &vocalsPath, &accompanimentPath);
+            return stream(argv[2], argv[3], &vocalsPath, &accompanimentPath, lookahead);
         }
         if ((argc == 4 || argc == 5) && std::string(argv[1]) == "live") {
             const double seconds = argc == 5 ? std::stod(argv[4]) : 10.0;

@@ -19,6 +19,7 @@ typedef struct {
     double sing_buffered, sing_position;
     float sing_pitch;
     int sing_model_ready;
+    double device_latency;
 } WSStatus;
 typedef struct { uint64_t id; double duration; char title[160]; } WSHistory;
 WS* ws_create(void);

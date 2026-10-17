@@ -44,6 +44,12 @@ public:
         tail.store(t + 1, std::memory_order_release);
         return true;
     }
+    bool peek(T& value) const noexcept {
+        auto t = tail.load(std::memory_order_relaxed);
+        if (t == head.load(std::memory_order_acquire)) return false;
+        value = data[t & (Capacity - 1)];
+        return true;
+    }
     size_t size() const noexcept { return head.load(std::memory_order_acquire) - tail.load(std::memory_order_acquire); }
 };
 

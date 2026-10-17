@@ -17,6 +17,36 @@ template<class T> static T property(AudioObjectID id, AudioObjectPropertySelecto
     check(AudioObjectGetPropertyData(id, &a, 0, nullptr, &size, &value), "Read audio device");
     return value;
 }
+static UInt32 frames(AudioObjectID id, AudioObjectPropertySelector selector, AudioObjectPropertyScope scope) {
+    UInt32 value = 0, size = sizeof(value);
+    AudioObjectPropertyAddress a{selector, scope, kAudioObjectPropertyElementMain};
+    return AudioObjectGetPropertyData(id, &a, 0, nullptr, &size, &value) ? 0 : value;
+}
+static double deviceLatency(AudioObjectID device, AudioObjectPropertyScope scope) {
+    UInt32 total = frames(device, kAudioDevicePropertyLatency, scope) + frames(device, kAudioDevicePropertySafetyOffset, scope) +
+                   frames(device, kAudioDevicePropertyBufferFrameSize, scope);
+    AudioObjectPropertyAddress streams{kAudioDevicePropertyStreams, scope, kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    if (!AudioObjectGetPropertyDataSize(device, &streams, 0, nullptr, &size) && size >= sizeof(AudioObjectID)) {
+        std::vector<AudioObjectID> ids(size / sizeof(AudioObjectID));
+        if (!AudioObjectGetPropertyData(device, &streams, 0, nullptr, &size, ids.data()))
+            total += frames(ids[0], kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal);
+    }
+    Float64 sampleRate = 0; UInt32 rateSize = sizeof(sampleRate); auto a = address(kAudioDevicePropertyNominalSampleRate);
+    if (AudioObjectGetPropertyData(device, &a, 0, nullptr, &rateSize, &sampleRate) || sampleRate <= 0) return 0;
+    return total / sampleRate;
+}
+// Returns the previous buffer size when the device was changed, otherwise zero.
+static UInt32 shrinkBuffer(AudioObjectID device, UInt32 wanted) {
+    auto a = address(kAudioDevicePropertyBufferFrameSize);
+    UInt32 previous = 0, size = sizeof(previous);
+    if (AudioObjectGetPropertyData(device, &a, 0, nullptr, &size, &previous)) return 0;
+    AudioValueRange range{}; size = sizeof(range); auto r = address(kAudioDevicePropertyBufferFrameSizeRange);
+    if (AudioObjectGetPropertyData(device, &r, 0, nullptr, &size, &range)) return 0;
+    auto target = UInt32(std::clamp(double(wanted), range.mMinimum, range.mMaximum));
+    if (target >= previous) return 0;
+    return AudioObjectSetPropertyData(device, &a, 0, nullptr, sizeof(target), &target) ? 0 : previous;
+}
 std::vector<Source> sources() {
     @autoreleasepool {
         auto a = address(kAudioHardwarePropertyProcessObjectList); UInt32 size = 0;
@@ -43,17 +73,23 @@ std::vector<Source> sources() {
         return result;
     }
 }
-struct Tap::Impl { AudioObjectID tap = 0, aggregate = 0; AudioDeviceIOProcID proc = nullptr; bool interleaved = true; };
+struct Tap::Impl {
+    AudioObjectID tap = 0, aggregate = 0; AudioDeviceIOProcID proc = nullptr; bool interleaved = true;
+    Feed feed = nullptr; void* context = nullptr; double latency = 0;
+};
 Tap::Tap() : impl(std::make_unique<Impl>()) {}
 Tap::~Tap() { stop(); }
 void Tap::stop() {
     if (impl->proc) { AudioDeviceStop(impl->aggregate, impl->proc); AudioDeviceDestroyIOProcID(impl->aggregate, impl->proc); impl->proc = nullptr; }
     if (impl->aggregate) { AudioHardwareDestroyAggregateDevice(impl->aggregate); impl->aggregate = 0; }
     if (impl->tap) { AudioHardwareDestroyProcessTap(impl->tap); impl->tap = 0; }
+    impl->feed = nullptr; impl->context = nullptr; impl->latency = 0;
     Frame frame; while (queue.pop(frame)) {}
 }
-double Tap::start(uint32_t source, bool mute) {
+double Tap::latency() const { return impl->latency; }
+double Tap::start(uint32_t source, bool mute, Feed feed, void* context) {
     stop();
+    impl->feed = feed; impl->context = context;
     @autoreleasepool {
         try {
             NSMutableArray<NSNumber*>* members = [NSMutableArray arrayWithObject:@(source)];
@@ -81,6 +117,7 @@ double Tap::start(uint32_t source, bool mute) {
                 @kAudioAggregateDeviceTapAutoStartKey: @YES
             };
             check(AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)aggregate, &impl->aggregate), "Create private capture device");
+            if (mute) shrinkBuffer(impl->aggregate, 128);
             check(AudioDeviceCreateIOProcID(impl->aggregate, [](AudioObjectID, const AudioTimeStamp*, const AudioBufferList* input, const AudioTimeStamp*, AudioBufferList*, const AudioTimeStamp*, void* context) -> OSStatus {
                 auto& tap = *static_cast<Tap*>(context);
                 if (!input || !input->mNumberBuffers) return noErr;
@@ -95,21 +132,33 @@ double Tap::start(uint32_t source, bool mute) {
                 for (unsigned i = 0; i < n; ++i) {
                     Frame f = tap.impl->interleaved ? Frame{l[i * channels], l[i * channels + (channels > 1)]} : Frame{l[i], r[i]};
                     if (!tap.queue.push(f)) tap.dropped.fetch_add(1, std::memory_order_relaxed);
+                    if (tap.impl->feed) tap.impl->feed(tap.impl->context, f);
                 }
                 return noErr;
             }, this, &impl->proc), "Create capture callback");
             check(AudioDeviceStart(impl->aggregate, impl->proc), "Start capture");
+            impl->latency = deviceLatency(impl->aggregate, kAudioObjectPropertyScopeInput);
             return format.mSampleRate;
         } catch (...) { stop(); throw; }
     }
 }
-struct Output::Impl { AudioUnit unit = nullptr; Render render = nullptr; void* context = nullptr; id activity = nil; };
+struct Output::Impl {
+    AudioUnit unit = nullptr; Render render = nullptr; void* context = nullptr; id activity = nil;
+    AudioObjectID device = 0; UInt32 restoreBuffer = 0; double latency = 0;
+};
 Output::Output() : impl(std::make_unique<Impl>()) {}
 Output::~Output() { stop(); }
 void Output::stop() {
     if (impl->unit) { AudioOutputUnitStop(impl->unit); AudioUnitUninitialize(impl->unit); AudioComponentInstanceDispose(impl->unit); impl->unit = nullptr; }
     if (impl->activity) { [NSProcessInfo.processInfo endActivity:impl->activity]; impl->activity = nil; }
+    if (impl->restoreBuffer) {
+        auto a = address(kAudioDevicePropertyBufferFrameSize);
+        AudioObjectSetPropertyData(impl->device, &a, 0, nullptr, sizeof(impl->restoreBuffer), &impl->restoreBuffer);
+        impl->restoreBuffer = 0;
+    }
+    impl->device = 0; impl->latency = 0;
 }
+double Output::latency() const { return impl->latency; }
 void Output::start(Render render, void* context, bool live) {
     // TODO: follow output device changes without restarting transport.
     stop(); impl->render = render; impl->context = context;
@@ -118,6 +167,8 @@ void Output::start(Render render, void* context, bool live) {
         AudioComponentDescription description{kAudioUnitType_Output, kAudioUnitSubType_HALOutput, kAudioUnitManufacturer_Apple, 0, 0};
         check(AudioComponentInstanceNew(AudioComponentFindNext(nullptr, &description), &impl->unit), "Create playback output");
         auto device = property<AudioObjectID>(kAudioObjectSystemObject, kAudioHardwarePropertyDefaultOutputDevice);
+        impl->device = device;
+        if (live) impl->restoreBuffer = shrinkBuffer(device, 128);
         check(AudioUnitSetProperty(impl->unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, sizeof(device)), "Choose playback device");
         AudioStreamBasicDescription format{44100, kAudioFormatLinearPCM, kAudioFormatFlagsNativeFloatPacked | kAudioFormatFlagIsNonInterleaved, 4, 1, 4, 2, 32, 0};
         check(AudioUnitSetProperty(impl->unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &format, sizeof(format)), "Set playback format");
@@ -132,6 +183,7 @@ void Output::start(Render render, void* context, bool live) {
         check(AudioUnitSetProperty(impl->unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callback, sizeof(callback)), "Set playback callback");
         check(AudioUnitInitialize(impl->unit), "Initialize playback");
         check(AudioOutputUnitStart(impl->unit), "Start playback");
+        impl->latency = deviceLatency(device, kAudioObjectPropertyScopeOutput);
     } catch (...) { stop(); throw; }
 }
 }

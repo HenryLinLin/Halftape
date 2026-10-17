@@ -14,6 +14,8 @@ public:
     virtual void reset() = 0;
     virtual bool process(const LiveBlock& input, LiveStems& output) = 0;
     virtual unsigned latency() const { return 2 * liveHop; }
+    // Trade quality or delay for less compute; takes effect at the next reset. Returns false when nothing is left to give.
+    virtual bool relax() { return false; }
 };
 class StreamingSeparator final : public LiveSeparator {
     struct Impl;
@@ -28,12 +30,13 @@ public:
 // Masks the mix with a spectrogram model that sees a short window ending a few frames ahead.
 class MaskSeparator : public LiveSeparator {
 public:
-    static constexpr unsigned size = 4096, hop = 1024, bins = size / 2 + 1, lookahead = 2, step = 2;
-    static constexpr unsigned delay = 3 * hop + (lookahead + step) * hop - liveHop;
-    explicit MaskSeparator(unsigned frames);
+    static constexpr unsigned size = 4096, hop = 1024, bins = size / 2 + 1;
+    explicit MaskSeparator(unsigned frames, unsigned lookahead = 2, unsigned step = 1);
     void reset() override;
     bool process(const LiveBlock& input, LiveStems& output) override;
     unsigned latency() const override { return delay + liveHop; }
+    bool relax() override;
+    unsigned stride() const { return step; }
     unsigned frames() const { return context; }
     float suppression = 1.5f;
     uint64_t starved = 0;
@@ -42,9 +45,11 @@ protected:
     virtual void estimate(const std::vector<float>& mixture, std::vector<float>& vocals) = 0;
 private:
     using Complex = std::complex<float>;
-    unsigned context;
-    std::vector<float> window, magnitudes, vocalMagnitudes;
-    std::vector<Complex> buffer, twiddle;
+    struct Covariance { float left = 0, right = 0; Complex cross{}; };
+    unsigned context, lookahead, step, nextStep, delay;
+    std::vector<float> window, magnitudes, vocalMagnitudes, mask;
+    std::vector<Complex> buffer, twiddle, filtered;
+    std::vector<Covariance> backing, vocal;
     std::vector<uint16_t> reversal;
     std::array<std::vector<float>, 2> history;
     std::vector<std::array<std::vector<Complex>, 2>> spectra;
@@ -62,11 +67,11 @@ private:
 class UmxSeparator final : public MaskSeparator {
     struct Impl;
     std::unique_ptr<Impl> impl;
-    explicit UmxSeparator(std::unique_ptr<Impl> loaded);
+    UmxSeparator(std::unique_ptr<Impl> loaded, unsigned ahead);
     void estimate(const std::vector<float>& mixture, std::vector<float>& vocals) override;
 public:
-    explicit UmxSeparator(const std::string& path);
+    explicit UmxSeparator(const std::string& path, unsigned ahead = 2);
     ~UmxSeparator();
 };
-std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path);
+std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path, unsigned lookahead = 2);
 }

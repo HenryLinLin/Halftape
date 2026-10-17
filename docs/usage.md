@@ -10,12 +10,12 @@ In Practice, use **Play** and **Loop** to play a clip. Drag A and B on the timel
 
 Live Sing removes vocals from audio as it plays in the selected source app. Start capture first, then choose a mode and click **Start Sing**. The mode picker is available while Sing is stopped.
 
-- **Clean** uses UMX-L with a longer buffer for vocal separation. The picker labels it as about 0.25 seconds; actual delay depends on your Mac. Run `scripts/sing-clean-model.sh` to prepare the model, or choose an existing `umxl-vocals.onnx` in the app.
+- **Clean** uses UMX-L with a longer buffer for vocal separation. The panel shows the measured delay once Sing is playing. Run `scripts/sing-clean-model.sh` to prepare the model, or choose an existing `umxl-vocals.onnx` in the app.
 - **Low latency** uses the StemGenRT hop-128 model. Run `scripts/sing-model.sh` to download it, or choose an existing `stemgenrt-hop128.onnx`.
 
 Keep the source playing during Sing: Halftape mutes its original output and plays the processed audio. Pause and seek in the source app. **Stop Sing** restores the original audio and stops capture; **Return to Clip** also resumes your practice clip.
 
-Vocals can remain even at 100% reduction. Transpose adds delay, and the processing estimate excludes device and Bluetooth latency. Low Power Mode can make Sing fall behind.
+Vocals can remain even at 100% reduction. Transpose adds delay. The delay shown includes the audio device as macOS reports it. With Low Power Mode on, Clean Sing may fall behind and stutter on some Macs. The Sing panel warns when it is on. If that happens, turn it off in System Settings under Battery, or use Low latency, which needs far less compute.
 
 ## Models and saved clips
 

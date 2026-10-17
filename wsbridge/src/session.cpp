@@ -146,7 +146,8 @@ void Session::status(WSStatus* s) {
     s->looping = engine.looping.load();
     s->speed = engine.speed.load(); s->pitch = engine.pitch.load();
     s->sing = bool(sing); s->quality = sing ? sing->quality.load() : 0;
-    s->sing_latency = sing ? sing->delay() : 0; s->vocal_removal = sing ? sing->removal.load() : 1;
+    s->device_latency = sing ? tap.latency() + output.latency() : 0;
+    s->sing_latency = sing ? sing->delay() + s->device_latency : 0; s->vocal_removal = sing ? sing->removal.load() : 1;
     if (sing) {
         s->sing_state = sing->state(); s->sing_buffered = sing->buffered();
         s->sing_position = sing->position(); s->sing_pitch = sing->pitch.load();
@@ -283,19 +284,18 @@ void Session::setSing(bool enabled) {
     auto id = source; auto name = sourceName; auto bundle = sourceBundle;
     disarm(); output.stop(); outputStarted = false;
     try {
-        double sr = tap.start(id, true);
+        double sr = tap.start(id, true, [](void* context, Frame frame) noexcept { static_cast<Sing*>(context)->feed(frame); }, nextSing.get());
         if (unsigned(sr) != sampleRate) throw std::runtime_error("The source audio format changed. Start Capture again before starting Sing.");
         capture = std::make_unique<CaptureStore>(unsigned(sr));
         sing = std::move(nextSing);
         source = id; sourceName = name; sourceBundle = bundle;
         startOutput(); captureStop.store(false); engine.playing.store(false);
         captureThread = std::thread([this] {
-            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
             std::array<Frame, 2048> frames;
             while (!captureStop.load()) {
                 size_t n = 0; while (n < frames.size() && tap.queue.pop(frames[n])) ++n;
-                if (n) { capture->append(frames.data(), n); for (size_t i = 0; i < n; ++i) sing->feed(frames[i]); }
-                else std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (n) capture->append(frames.data(), n);
+                else std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
         });
         error("Sing is processing live audio. Keep the source playing.");

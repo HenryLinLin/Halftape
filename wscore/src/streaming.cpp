@@ -1,4 +1,5 @@
 #include "wscore/streaming.hpp"
+#include <chrono>
 #include <CommonCrypto/CommonDigest.h>
 #include <fstream>
 #include <iomanip>
@@ -98,7 +99,10 @@ bool StreamingSeparator::process(const LiveBlock& input, LiveStems& output) {
 }
 #ifdef __APPLE__
 static OrtCustomThreadHandle interactiveThread(void*, OrtThreadWorkerFn work, void* param) {
-    auto* thread = new std::thread([work, param] { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); work(param); });
+    auto* thread = new std::thread([work, param] {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        work(param);
+    });
     return reinterpret_cast<OrtCustomThreadHandle>(thread);
 }
 static void joinThread(OrtCustomThreadHandle handle) {
@@ -113,7 +117,7 @@ struct UmxSeparator::Impl {
     Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     std::vector<int64_t> shape;
     std::string input, output;
-    unsigned frames = 0;
+    unsigned frames = 0, step = 1;
     explicit Impl(const std::string& path) {
         Ort::SessionOptions options;
         options.SetIntraOpNumThreads(2); options.SetInterOpNumThreads(1);
@@ -134,21 +138,31 @@ struct UmxSeparator::Impl {
             out.GetShape() != shape || in.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || out.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
             throw std::runtime_error(unsupported);
         frames = unsigned(shape[3]);
+        // Warm the session up and pick how often the model runs: every hop when a run fits comfortably inside one.
+        std::vector<float> warm(size_t(2) * MaskSeparator::bins * frames), result(warm.size());
+        double fastest = 1;
+        for (int i = 0; i < 3; ++i) {
+            auto begin = std::chrono::steady_clock::now();
+            estimate(warm, result);
+            fastest = std::min(fastest, std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+        }
+        if (fastest > .5 * MaskSeparator::hop / rate) step = 2;
+    }
+    void estimate(const std::vector<float>& mixture, std::vector<float>& vocals) {
+        auto in = Ort::Value::CreateTensor<float>(memory, const_cast<float*>(mixture.data()), mixture.size(), shape.data(), shape.size());
+        auto out = Ort::Value::CreateTensor<float>(memory, vocals.data(), vocals.size(), shape.data(), shape.size());
+        const char* inputs[]{input.c_str()}; const char* outputs[]{output.c_str()};
+        session->Run(run, inputs, &in, 1, outputs, &out, 1);
+        for (float& x : vocals) if (!std::isfinite(x)) throw std::runtime_error("Invalid Sing model output");
     }
 };
-UmxSeparator::UmxSeparator(const std::string& path) : UmxSeparator(std::make_unique<Impl>(path)) {}
-UmxSeparator::UmxSeparator(std::unique_ptr<Impl> loaded) : MaskSeparator(loaded->frames), impl(std::move(loaded)) {}
+UmxSeparator::UmxSeparator(const std::string& path, unsigned ahead) : UmxSeparator(std::make_unique<Impl>(path), ahead) {}
+UmxSeparator::UmxSeparator(std::unique_ptr<Impl> loaded, unsigned ahead) : MaskSeparator(loaded->frames, ahead, loaded->step), impl(std::move(loaded)) {}
 UmxSeparator::~UmxSeparator() = default;
-void UmxSeparator::estimate(const std::vector<float>& mixture, std::vector<float>& vocals) {
-    auto in = Ort::Value::CreateTensor<float>(impl->memory, const_cast<float*>(mixture.data()), mixture.size(), impl->shape.data(), impl->shape.size());
-    auto out = Ort::Value::CreateTensor<float>(impl->memory, vocals.data(), vocals.size(), impl->shape.data(), impl->shape.size());
-    const char* inputs[]{impl->input.c_str()}; const char* outputs[]{impl->output.c_str()};
-    impl->session->Run(impl->run, inputs, &in, 1, outputs, &out, 1);
-    for (float& x : vocals) if (!std::isfinite(x)) throw std::runtime_error("Invalid Sing model output");
-}
-std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path) {
+void UmxSeparator::estimate(const std::vector<float>& mixture, std::vector<float>& vocals) { impl->estimate(mixture, vocals); }
+std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path, unsigned lookahead) {
     if (digest(path) == stemgenrt) return std::make_unique<StreamingSeparator>(path);
-    return std::make_unique<UmxSeparator>(path);
+    return std::make_unique<UmxSeparator>(path, lookahead);
 }
 #else
 struct StreamingSeparator::Impl {};
@@ -157,10 +171,10 @@ StreamingSeparator::~StreamingSeparator() = default;
 void StreamingSeparator::reset() {}
 bool StreamingSeparator::process(const LiveBlock&, LiveStems&) { return false; }
 struct UmxSeparator::Impl { unsigned frames = 0; };
-UmxSeparator::UmxSeparator(const std::string&) : UmxSeparator(std::make_unique<Impl>()) {}
-UmxSeparator::UmxSeparator(std::unique_ptr<Impl> loaded) : MaskSeparator(loaded->frames), impl(std::move(loaded)) {}
+UmxSeparator::UmxSeparator(const std::string&, unsigned ahead) : UmxSeparator(std::make_unique<Impl>(), ahead) {}
+UmxSeparator::UmxSeparator(std::unique_ptr<Impl> loaded, unsigned ahead) : MaskSeparator(loaded->frames, ahead), impl(std::move(loaded)) {}
 UmxSeparator::~UmxSeparator() = default;
 void UmxSeparator::estimate(const std::vector<float>&, std::vector<float>&) {}
-std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path) { return std::make_unique<StreamingSeparator>(path); }
+std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path, unsigned) { return std::make_unique<StreamingSeparator>(path); }
 #endif
 }
