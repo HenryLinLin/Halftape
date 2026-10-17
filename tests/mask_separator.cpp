@@ -78,6 +78,7 @@ int main() {
         }
         for (unsigned sr : {44100u, 48000u}) {
             ws::Sing sing(sr, std::make_unique<BandSeparator>(380, 500));
+            sing.minimumTarget.store(5120);
             float l[256], r[256];
             double center = 0, side = 0, maxDelay = 0;
             uint64_t fed = 0;
