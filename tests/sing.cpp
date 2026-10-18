@@ -92,6 +92,32 @@ int main() {
             require(sing.relaxed.load() == 1, "a model that falls behind must be asked to relax exactly once");
             require(audibleAfterRelax > ws::rate / 256, "audio must keep flowing after the model relaxes");
         }
+        for (bool steady : {true, false}) {
+            ws::Sing sing(ws::rate, std::make_unique<TestSeparator>());
+            sing.steady.store(steady);
+            float l[256], r[256];
+            uint64_t fed = 0; unsigned tick = 0;
+            unsigned first = sing.targetFrames.load(), atFive = 0, atSix = 0;
+            double nominalAtFive = 0;
+            auto start = std::chrono::steady_clock::now();
+            while (tick < 6 * ws::rate / 256) {
+                while (fed < uint64_t(tick + 1) * 256) {
+                    float x = .2f * std::sin(double(fed) / ws::rate * 2764.6);
+                    sing.feed({x, -x}); ++fed;
+                }
+                std::this_thread::sleep_until(start + std::chrono::duration<double>(double((tick + 1) * 256) / ws::rate));
+                sing.render(l, r, 256); ++tick;
+                if (tick == 5 * ws::rate / 256) { atFive = sing.targetFrames.load(); nominalAtFive = sing.nominalDelay(); }
+            }
+            atSix = sing.targetFrames.load();
+            std::cout << (steady ? "steady" : "settling") << ": start=" << first << " at_5s=" << atFive << " at_6s=" << atSix
+                      << " nominal_s=" << nominalAtFive << " underruns=" << sing.underruns.load() << '\n';
+            if (sing.underruns.load() == 0) {
+                require(atFive == atSix, "the cushion must stop moving once settled");
+                require(steady ? atFive >= first : atFive < first, steady ? "steady mode must keep the starting cushion" : "the default mode must settle below the starting cushion");
+            }
+            require(std::abs(nominalAtFive - (double(atFive) + 2 * ws::liveHop) / ws::rate) < 1e-9, "the nominal delay must follow the cushion and the model latency");
+        }
         {
             // A large cushion holds 186 ms of audio; silent input must cut it well before it drains on its own.
             ws::Sing sing(ws::rate, std::make_unique<TestSeparator>());

@@ -20,6 +20,10 @@ typedef struct {
     float sing_pitch;
     int sing_model_ready;
     double device_latency;
+    uint64_t sing_epoch;
+    int capture_pid;
+    char capture_bundle[256];
+    double sing_queue;
 } WSStatus;
 typedef struct { uint64_t id; double duration; char title[160]; } WSHistory;
 WS* ws_create(void);
@@ -48,9 +52,15 @@ void ws_set_sing_model(WS*, const char* path);
 void ws_sing(WS*, int enabled);
 void ws_vocals(WS*, float removal);
 void ws_pause_source(WS*, int enabled);
+/* command: 0 previous, 1 play/pause, 2 next */
+void ws_source_transport(WS*, int command);
 void ws_seek(WS*, double seconds);
 void ws_loop_enabled(WS*, int enabled);
 void ws_sing_pitch(WS*, float semitones);
+/* keep the Sing cushion fixed for the session so the reported delay does not move */
+void ws_sing_steady(WS*, int enabled);
+/* frames of future context the clean Sing model sees; each frame adds about 23 ms of delay; applies at the next Start Sing */
+void ws_sing_lookahead(WS*, int frames);
 #ifdef __cplusplus
 }
 #endif

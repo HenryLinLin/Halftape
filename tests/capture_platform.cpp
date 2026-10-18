@@ -66,4 +66,5 @@ std::vector<Source> sources() {
             {43, 2, "Mock Source B", "mock.b", true}};
 }
 void pauseSourceApp(const std::string&) {}
+void transportSourceApp(const std::string&, int) {}
 }

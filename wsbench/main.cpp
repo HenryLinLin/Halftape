@@ -23,6 +23,7 @@ void help() {
                  "  wsbench separate model.bin 4|6 file.wav\n"
                  "  wsbench stream model.onnx mixture.wav [vocals.wav accompaniment.wav] [lookahead]\n"
                  "  wsbench live model.onnx mixture.wav [seconds]\n"
+                 "  wsbench compare sing.onnx htdemucs.bin mixture.wav [lookahead] [wiener 0|1] [forget] [smooth] [binsmooth 0|1]\n"
                  "  wsbench sdr reference.wav estimate.wav\n";
 }
 
@@ -131,6 +132,58 @@ int stream(const std::string& modelPath, const std::string& mixturePath,
         }
         std::cout << "mix_fit_note: 2x2 least-squares diagnostic; not a standalone quality score\n";
     }
+    return 0;
+}
+
+// Scores the live separator against HTDemucs run offline on the same song, so settings can be compared by number.
+int compare(const std::string& livePath, const std::string& offlinePath, const std::string& mixturePath,
+            unsigned lookahead, bool wiener, float forget, float smooth, bool binSmooth) {
+    auto mixture = readAtRate(mixturePath);
+    const size_t frames = mixture[0].size();
+    if (!frames) throw std::runtime_error("empty audio");
+    ws::Separator offline;
+    offline.load(offlinePath, 4);
+    auto reference = offline.separate(mixture);
+    // Offline stems are in UI order: vocals first, then drums, bass and other.
+    ws::Stereo referenceAccompaniment = mixture;
+    for (int ch = 0; ch < 2; ++ch) for (size_t i = 0; i < frames; ++i)
+        referenceAccompaniment[ch][i] = mixture[ch][i] - reference[0][ch][i];
+
+    auto separator = ws::openLiveSeparator(livePath, lookahead);
+    if (auto* mask = dynamic_cast<ws::MaskSeparator*>(separator.get())) { mask->wiener = wiener; mask->forget = forget; mask->timeSmooth = smooth; mask->binSmooth = binSmooth; }
+    const size_t hops = (frames + ws::liveHop - 1) / ws::liveHop;
+    ws::Stereo vocals, accompaniment;
+    for (auto& channel : vocals) channel.reserve(hops * ws::liveHop);
+    for (auto& channel : accompaniment) channel.reserve(hops * ws::liveHop);
+    ws::LiveStems output{};
+    auto append = [&] {
+        for (size_t i = 0; i < ws::liveHop; ++i) {
+            vocals[0].push_back(output[2][i].l); vocals[1].push_back(output[2][i].r);
+            accompaniment[0].push_back(output[0][i].l + output[1][i].l + output[3][i].l);
+            accompaniment[1].push_back(output[0][i].r + output[1][i].r + output[3][i].r);
+        }
+    };
+    for (size_t h = 0; h < hops; ++h) {
+        ws::LiveBlock input{};
+        for (size_t i = 0; i < ws::liveHop; ++i) {
+            const size_t source = h * ws::liveHop + i;
+            if (source < frames) input[i] = {mixture[0][source], mixture[1][source]};
+        }
+        if (separator->process(input, output)) append();
+    }
+    ws::LiveBlock zero{};
+    for (unsigned flushed = 0; flushed + 2 * ws::liveHop <= separator->latency(); flushed += ws::liveHop)
+        if (separator->process(zero, output)) append();
+    for (auto* stem : {&vocals, &accompaniment}) for (auto& channel : *stem) {
+        if (channel.size() < frames) throw std::runtime_error("live separator returned too few frames");
+        channel.resize(frames);
+    }
+    std::cout << std::fixed << std::setprecision(3)
+              << "lookahead: " << lookahead << "\nwiener: " << wiener << "\nforget: " << forget << "\nsmooth: " << smooth << "\nbinsmooth: " << binSmooth
+              << "\nlive_delay_ms: " << 1000.0 * separator->latency() / ws::rate
+              << "\nmixture_vs_offline_accompaniment_sdr_db: " << sdrDb(referenceAccompaniment, mixture, frames)
+              << "\nlive_vs_offline_accompaniment_sdr_db: " << sdrDb(referenceAccompaniment, accompaniment, frames)
+              << "\nlive_vs_offline_vocals_sdr_db: " << sdrDb(reference[0], vocals, frames) << '\n';
     return 0;
 }
 
@@ -300,6 +353,14 @@ int main(int argc, char** argv) {
         if ((argc == 4 || argc == 5) && std::string(argv[1]) == "live") {
             const double seconds = argc == 5 ? std::stod(argv[4]) : 10.0;
             return live(argv[2], argv[3], seconds);
+        }
+        if (argc >= 5 && argc <= 10 && std::string(argv[1]) == "compare") {
+            const unsigned lookahead = argc > 5 ? unsigned(std::stoul(argv[5])) : 2;
+            const bool wiener = argc > 6 ? std::stoi(argv[6]) != 0 : false;
+            const float forget = argc > 7 ? std::stof(argv[7]) : .95f;
+            const float smooth = argc > 8 ? std::stof(argv[8]) : 0.f;
+            const bool binSmooth = argc > 9 ? std::stoi(argv[9]) != 0 : false;
+            return compare(argv[2], argv[3], argv[4], lookahead, wiener, forget, smooth, binSmooth);
         }
         if (argc == 3 && std::string(argv[1]) == "inspect") return inspect(argv[2]);
         if (argc == 4 && std::string(argv[1]) == "sdr") return sdr(argv[2], argv[3]);

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Carbon
+import Combine
 import UniformTypeIdentifiers
 
 @main
@@ -60,6 +61,11 @@ private func cString<T>(_ bytes: T) -> String {
     @Published var modelSing = UserDefaults.standard.string(forKey: "modelSing") ?? ""
     @Published var modelClean = UserDefaults.standard.string(forKey: "modelClean") ?? ""
     @Published var singClean = UserDefaults.standard.object(forKey: "singClean") as? Bool ?? true
+    @Published var singLookahead = UserDefaults.standard.object(forKey: "singLookahead") as? Int ?? 2 {
+        didSet { UserDefaults.standard.set(singLookahead, forKey: "singLookahead"); ws_sing_lookahead(ws, Int32(singLookahead)) }
+    }
+    let mirror = LyricsMirror()
+    private var mirrorObserver: AnyCancellable?
     @Published var gains = Array(repeating: 1.0, count: 6)
     @Published var mutes = Array(repeating: false, count: 6)
     @Published var solos = Array(repeating: false, count: 6)
@@ -86,9 +92,11 @@ private func cString<T>(_ bytes: T) -> String {
             MainActor.assumeIsolated { self?.close() }
         }
         hotkeys = HotKeyController(model: self)
+        mirrorObserver = mirror.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         discoverModelsIfNeeded()
         setModels()
         setSingModel()
+        ws_sing_lookahead(ws, Int32(singLookahead))
         refreshSources()
         ws_count_in(ws, countIn ? 1 : 0)
         poller = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in guard let model = self else { return }; MainActor.assumeIsolated { model.poll() } }
@@ -116,6 +124,8 @@ private func cString<T>(_ bytes: T) -> String {
         ws_status(ws, &status)
         let lowPowerModeNow = ProcessInfo.processInfo.isLowPowerModeEnabled
         if lowPowerMode != lowPowerModeNow { lowPowerMode = lowPowerModeNow }
+        ws_sing_steady(ws, mirror.enabled ? 1 : 0)
+        mirror.update(pid: status.capture_pid, bundle: cString(status.capture_bundle), delay: status.sing_latency, singing: status.sing != 0, playing: status.sing_state == 3, epoch: status.sing_epoch)
         var wave = Array(repeating: Float(0), count: 1024)
         let wn = ws_waveform(ws, &wave, Int32(wave.count)); waveform = Array(wave.prefix(max(0, Int(wn))))
         var grid = Array(repeating: Double(0), count: 512)
@@ -127,6 +137,8 @@ private func cString<T>(_ bytes: T) -> String {
     func stopCapture() { guard capturing else { return }; ws_stop_capture(ws); poll() }
     func updateStem(_ index:Int) { guard status.stems_ready > 0, !isSinging else { return }; ws_stem(ws, Int32(index), Float(gains[index]), mutes[index] ? 1:0, solos[index] ? 1:0) }
     func toggleSing() { guard capturing || status.sing != 0 else { return }; ws_sing(ws, status.sing == 0 ? 1 : 0); poll() }
+    var hasSource: Bool { status.capture_pid > 0 }
+    func transport(_ command: Int32) { guard hasSource else { return }; ws_source_transport(ws, command); poll() }
     func grab(_ seconds: Double? = nil) {
         guard canGrab else { return }
         let now = Date()
@@ -216,6 +228,7 @@ private func cString<T>(_ bytes: T) -> String {
     private weak var model: PracticeModel?
     private var gHotKey: EventHotKeyRef?
     private var kHotKey: EventHotKeyRef?
+    private var transportKeys: [EventHotKeyRef?] = []
     private var handler: EventHandlerRef?
     init(model: PracticeModel) {
         self.model = model
@@ -226,14 +239,21 @@ private func cString<T>(_ bytes: T) -> String {
             let k = EventHotKeyID(signature: OSType(0x57534844), id: 2)
             RegisterEventHotKey(UInt32(kVK_ANSI_G), UInt32(controlKey | optionKey), g, GetEventDispatcherTarget(), 0, &gHotKey)
             RegisterEventHotKey(UInt32(kVK_ANSI_K), UInt32(controlKey | optionKey), k, GetEventDispatcherTarget(), 0, &kHotKey)
+            for (index, code) in [kVK_ANSI_P, kVK_Space, kVK_ANSI_N].enumerated() {
+                var ref: EventHotKeyRef?
+                RegisterEventHotKey(UInt32(code), UInt32(controlKey | optionKey), EventHotKeyID(signature: OSType(0x57534844), id: UInt32(3 + index)), GetEventDispatcherTarget(), 0, &ref)
+                transportKeys.append(ref)
+            }
         }
     }
     func event(_ id: UInt32, pressed: Bool) {
         if id == 1 { if pressed, let m = model { m.revealPractice(); m.startHold() } else { model?.endHold() } }
         else if id == 2, pressed, let m = model { m.toggleSing(); m.revealSing() }
+        else if id >= 3, id <= 5, pressed, let m = model { m.transport(Int32(id - 3)) }
     }
     fileprivate func dispose() {
         if let gHotKey { UnregisterEventHotKey(gHotKey) }; if let kHotKey { UnregisterEventHotKey(kHotKey) }
+        for key in transportKeys { if let key { UnregisterEventHotKey(key) } }
         if let handler { RemoveEventHandler(handler) }
     }
 }
@@ -258,6 +278,13 @@ struct MenuContent: View {
             HStack { Button { m.revealPractice(); m.grab() } label: { Label(m.grabLabel, systemImage: "arrow.down.to.line") }.disabled(!m.canGrab); Button { m.togglePlay() } label: { Label(m.isSinging ? "Play Clip" : (m.status.playing == 0 ? "Play Clip" : "Pause"), systemImage: m.status.playing == 0 ? "play.fill" : "pause.fill") }.disabled(m.status.duration < 0.1) }
             Picker("Source",selection:$m.sourceId) { ForEach(m.sources,id:\.id) { source in Text(cString(source.name)).tag(source.id) } }.disabled(m.capturing)
             Button("Refresh sources") { m.refreshSources() }
+            if m.hasSource {
+                HStack {
+                    Button { m.transport(0) } label: { Image(systemName: "backward.fill") }.help("Previous track in \(m.capturedSourceName) · Control Option P")
+                    Button { m.transport(1) } label: { Image(systemName: "playpause.fill") }.help("Play or pause \(m.capturedSourceName) · Control Option Space")
+                    Button { m.transport(2) } label: { Image(systemName: "forward.fill") }.help("Next track in \(m.capturedSourceName) · Control Option N")
+                }
+            }
             Button(m.capturing ? "Stop Capture" : "Start Capture") { m.capturing ? m.stopCapture() : m.arm() }.disabled(!m.capturing && m.sourceId == 0).help(m.capturing ? "Stop capture and keep the captured audio available" : "Start capture and replace the current capture buffer")
             Button("Open Practice") { m.revealPractice() }
             Button("Live Sing…") { m.revealSing() }
@@ -515,8 +542,38 @@ struct LiveSingControls: View {
             Button("+") { ws_sing_pitch(m.ws,min(6,m.status.sing_pitch+1)); m.poll() }.disabled(m.status.sing == 0 || m.status.sing_pitch >= 6)
         }.frame(maxWidth:.infinity) }
         GroupBox("Separation") { HStack { Text("Model"); Spacer(); Text(qualityName).foregroundStyle(.secondary) } }
+        GroupBox("Lyrics mirror") { VStack(alignment: .leading, spacing: 8) {
+            Toggle("Delay the lyrics on screen to match the audio", isOn: Binding(get: { m.mirror.enabled }, set: { m.mirror.enabled = $0 })).disabled(!m.hasSource)
+            if m.mirror.enabled {
+                let state = m.mirror.state
+                let good = { if case .mirroring = state { return true } else { return false } }()
+                let bad = { switch state { case .needsPermission, .failed: return true; default: return false } }()
+                Label(state.text, systemImage: state.symbol).font(.caption).foregroundStyle(good ? .green : bad ? .orange : .secondary)
+                HStack {
+                    if m.mirror.settingUp {
+                        Button("Cancel setup") { m.mirror.cancelSetup() }
+                    } else {
+                    switch state {
+                    case .needsPermission:
+                        Button("Open System Settings") { m.mirror.openPermissionSettings() }
+                    case .noSource, .windowOffScreen:
+                        EmptyView()
+                    default:
+                        if m.mirror.areaSet {
+                            Button("Show area") { m.mirror.showArea() }
+                            Button("Change…") { m.mirror.beginSetup() }
+                            Button("Clear") { m.mirror.clearArea() }
+                        } else {
+                            Button("Set lyrics area…") { m.mirror.beginSetup() }
+                        }
+                    }
+                    }
+                }
+                Toggle("Show the delay badge on the mirror", isOn: Binding(get: { m.mirror.showBadge }, set: { m.mirror.showBadge = $0 })).font(.caption)
+            }
+        } }
         Text("Streaming separation may leave some vocals.").font(.caption).foregroundStyle(.secondary)
-        Text("To skip or pause live audio, use the source app. Use the clip for looping and individual stem controls.").font(.caption).foregroundStyle(.secondary)
+        Text("Skip or pause from the menu bar, with Control Option P, Space and N, or in the source app. Use the clip for looping and individual stem controls.").font(.caption).foregroundStyle(.secondary)
         HStack { Button(m.status.sing == 0 ? "Start Sing" : "Stop Sing") { m.toggleSing() }.buttonStyle(.borderedProminent).disabled(m.status.sing == 0 && (!m.capturing || m.status.sing_model_ready == 0)); Spacer(); if showsReturnToClip { Button("Return to Clip") { ws_play(m.ws,1); m.poll() }.disabled(m.status.duration < 0.1) } }
     }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:10)) }
     var qualityName:String { m.status.sing == 0 ? "Stopped" : (m.singClean ? "UMX-L (clean)" : "StemGenRT") }

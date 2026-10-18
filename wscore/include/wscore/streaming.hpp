@@ -39,6 +39,9 @@ public:
     unsigned stride() const { return step; }
     unsigned frames() const { return context; }
     float suppression = 1.5f;
+    // Optional post-processing of the mask. Measured against HTDemucs on music, the plain mask scored best, so all are off.
+    bool wiener = false, binSmooth = false;
+    float forget = .95f, timeSmooth = 0;
     uint64_t starved = 0;
 protected:
     // Both buffers are laid out as [channel][bin][frame], oldest frame first.
@@ -47,7 +50,7 @@ private:
     using Complex = std::complex<float>;
     struct Covariance { float left = 0, right = 0; Complex cross{}; };
     unsigned context, lookahead, step, nextStep, delay;
-    std::vector<float> window, magnitudes, vocalMagnitudes, mask;
+    std::vector<float> window, magnitudes, vocalMagnitudes, mask, previousMask;
     std::vector<Complex> buffer, twiddle, filtered;
     std::vector<Covariance> backing, vocal;
     std::vector<uint16_t> reversal;

@@ -157,7 +157,8 @@ struct UmxSeparator::Impl {
     }
 };
 UmxSeparator::UmxSeparator(const std::string& path, unsigned ahead) : UmxSeparator(std::make_unique<Impl>(path), ahead) {}
-UmxSeparator::UmxSeparator(std::unique_ptr<Impl> loaded, unsigned ahead) : MaskSeparator(loaded->frames, ahead, loaded->step), impl(std::move(loaded)) {}
+UmxSeparator::UmxSeparator(std::unique_ptr<Impl> loaded, unsigned ahead)
+    : MaskSeparator(loaded->frames, std::min(ahead, loaded->frames - 2), loaded->step), impl(std::move(loaded)) {}
 UmxSeparator::~UmxSeparator() = default;
 void UmxSeparator::estimate(const std::vector<float>& mixture, std::vector<float>& vocals) { impl->estimate(mixture, vocals); }
 std::unique_ptr<LiveSeparator> openLiveSeparator(const std::string& path, unsigned lookahead) {

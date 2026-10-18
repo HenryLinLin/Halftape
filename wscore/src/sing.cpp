@@ -21,7 +21,7 @@ void realtimePolicy(double periodSeconds, double computationSeconds) noexcept {
     (void)periodSeconds; (void)computationSeconds;
 #endif
 }
-Sing::Sing(unsigned sampleRate, const std::string& model) : Sing(sampleRate, openLiveSeparator(model)) {}
+Sing::Sing(unsigned sampleRate, const std::string& model, unsigned lookahead) : Sing(sampleRate, openLiveSeparator(model, lookahead)) {}
 Sing::Sing(unsigned sampleRate, std::unique_ptr<LiveSeparator> processor)
     : separator(std::move(processor)), sourceRate(sampleRate) {
     if (sampleRate < 8000 || sampleRate > 192000 || !separator) throw std::runtime_error("Unsupported live audio format");
@@ -42,6 +42,10 @@ double Sing::delay() const noexcept {
     double queuedDelay = std::max(0., (double(captured.load()) - double(consumed.load())) / sourceRate);
     return queuedDelay + (std::abs(pitch.load()) > .001f ? double(stretch.inputLatency() + stretch.outputLatency()) / rate : 0);
 }
+double Sing::nominalDelay() const noexcept {
+    double frames = double(separator->latency()) + double(targetFrames.load());
+    return frames / rate + resamplerSeconds.load() + (std::abs(pitch.load()) > .001f ? double(stretch.inputLatency() + stretch.outputLatency()) / rate : 0);
+}
 int Sing::state() const noexcept {
     if (failed.load()) return 5;
     auto signal = lastAudible.load();
@@ -57,12 +61,14 @@ void Sing::run() {
     try {
         r8b::CDSPResampler leftSRC(sourceRate, rate, 256, 4., 180.15, r8b::fprMinPhase);
         r8b::CDSPResampler rightSRC(sourceRate, rate, 256, 4., 180.15, r8b::fprMinPhase);
+        if (sourceRate != rate) resamplerSeconds.store(double(leftSRC.getInLenBeforeOutPos(0)) / sourceRate);
         std::array<double, 256> l{}, r{};
         LiveBlock hop{}; LiveStems stems{};
         unsigned fill = 0;
         uint64_t expected = 0, origin = 0, resampled = 0, generation = 0, flushedAt = 0;
         unsigned overruns = 0, windowHops = 0, slowWindows = 0;
         double worst = 0, previousWorst = 0, windowSeconds = 0, ceiling = targetFrames.load();
+        unsigned windows = 0, locked = 0;
         uint64_t backlog = 0, previousBacklog = 0;
         bool flushed = false, relaxPending = false;
         auto lastOverrun = std::chrono::steady_clock::time_point{};
@@ -96,8 +102,8 @@ void Sing::run() {
                 if (slowWindows >= 2) relax();
                 windowHops = 0; previousWorst = worst; worst = 0; windowSeconds = 0;
                 previousBacklog = backlog; backlog = 0;
-                ceiling *= .75;
-                boost.store(boost.load() * 9 / 10);
+                // Shrink for the first four seconds, then lock so the delay stops moving mid-song.
+                if (++windows < 4 && !steady.load() && !locked) ceiling *= .75; else if (!locked) locked = targetFrames.load();
                 // Ask for at most half of each period so a slow run never trips the scheduler's overrun failsafe.
                 double period = hopSeconds * std::ceil(std::max(1., 4 * previousWorst / hopSeconds));
                 realtimePolicy(period, std::min(2 * previousWorst, .5 * period));
@@ -107,8 +113,11 @@ void Sing::run() {
             double slowest = std::max(worst, previousWorst);
             double lateness = double(std::max(backlog, previousBacklog)) * rate / sourceRate;
             double cushion = slowest * rate * 1.5 + lateness + 512 + liveHop + boost.load();
-            auto target = unsigned(std::max(cushion, ceiling));
-            targetFrames.store(std::clamp(target, std::min(minimumTarget.load(), 8192u), 8192u));
+            if (steady.load() && !locked) locked = targetFrames.load();
+            auto target = unsigned(std::max({cushion, ceiling, double(locked)}));
+            target = std::clamp(target, std::min(minimumTarget.load(), 8192u), 8192u);
+            if (locked) locked = std::max(locked, target);
+            targetFrames.store(target);
             if (!valid) return;
             auto first = resampled - separator->latency();
             for (unsigned i = 0; i < liveHop; ++i) {
@@ -220,13 +229,12 @@ void Sing::render(float* left, float* right, unsigned count) noexcept WS_REALTIM
         } else {
             std::copy_n(mixed[0].data(), n, left + offset); std::copy_n(mixed[1].data(), n, right + offset);
         }
-        for (unsigned i = offset; i < offset + n; ++i) {
-            float peak = std::max(std::abs(left[i]), std::abs(right[i]));
-            float desired = peak > .98f ? .98f / peak : 1;
-            gain = desired < gain ? desired : gain + .0002f * (desired - gain);
-            left[i] = std::isfinite(left[i]) ? left[i] * gain : 0;
-            right[i] = std::isfinite(right[i]) ? right[i] * gain : 0;
-        }
+        // Fixed headroom and a soft knee above it, so loud transients never pump the level.
+        auto shape = [](float x) {
+            x = std::isfinite(x) ? x * .7f : 0;
+            return std::abs(x) <= .8f ? x : std::copysign(.8f + .2f * std::tanh((std::abs(x) - .8f) / .2f), x);
+        };
+        for (unsigned i = offset; i < offset + n; ++i) { left[i] = shape(left[i]); right[i] = shape(right[i]); }
         offset += n;
     }
     if (count) { lastLeft = left[count - 1]; lastRight = right[count - 1]; }

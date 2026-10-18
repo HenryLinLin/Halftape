@@ -75,7 +75,10 @@ void ws_set_sing_model(WS* h, const char* path) {
 void ws_sing(WS* h, int enabled) { invoke(h, [&](ws::Session& s) { s.setSing(enabled != 0); }); }
 void ws_vocals(WS* h, float removal) { invoke(h, [&](ws::Session& s) { s.vocals(removal); }); }
 void ws_pause_source(WS* h, int enabled) { invoke(h, [&](ws::Session& s) { s.setPause(enabled != 0); }); }
+void ws_source_transport(WS* h, int command) { invoke(h, [&](ws::Session& s) { s.transport(command); }); }
 void ws_seek(WS* h, double seconds) { invoke(h, [&](ws::Session& s) { s.seek(seconds); }); }
 void ws_loop_enabled(WS* h, int enabled) { invoke(h, [&](ws::Session& s) { s.loopEnabled(enabled != 0); }); }
 void ws_sing_pitch(WS* h, float semitones) { invoke(h, [&](ws::Session& s) { s.singPitch(semitones); }); }
+void ws_sing_steady(WS* h, int enabled) { invoke(h, [&](ws::Session& s) { s.singSteady(enabled != 0); }); }
+void ws_sing_lookahead(WS* h, int frames) { invoke(h, [&](ws::Session& s) { s.singLookahead(frames); }); }
 }

@@ -16,6 +16,7 @@ xcrun swiftc -O -parse-as-library -target arm64-apple-macos14.4 \
   -L "$ort_dir/lib" -lonnxruntime -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   -lc++ -framework AppKit -framework SwiftUI -framework Carbon -framework CoreAudio \
   -framework AudioUnit -framework Accelerate -framework ApplicationServices -framework IOKit \
+  -framework ScreenCaptureKit -framework CoreMedia -framework VideoToolbox -framework QuartzCore \
   -o "$app/Contents/MacOS/Halftape"
 cp LICENSE THIRD_PARTY.md "$app/Contents/Resources/"
 cp .deps/stretch/LICENSE.txt "$app/Contents/Resources/licenses/Signalsmith-Stretch.txt"

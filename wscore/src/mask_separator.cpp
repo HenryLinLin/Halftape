@@ -16,7 +16,7 @@ MaskSeparator::MaskSeparator(unsigned frames, unsigned ahead, unsigned stride)
         reversal[i] = uint16_t(r);
     }
     magnitudes.resize(2 * bins * context); vocalMagnitudes.resize(magnitudes.size());
-    mask.resize(bins); filtered.resize(2 * bins); backing.resize(bins); vocal.resize(bins);
+    mask.resize(bins); previousMask.resize(bins); filtered.resize(2 * bins); backing.resize(bins); vocal.resize(bins);
     for (auto& h : history) h.resize(size);
     spectra.resize(lookahead + 3);
     for (auto& s : spectra) for (auto& c : s) c.resize(bins);
@@ -35,7 +35,7 @@ void MaskSeparator::reset() {
     for (auto& h : history) std::fill(h.begin(), h.end(), 0.f);
     for (auto& s : spectra) for (auto& c : s) std::fill(c.begin(), c.end(), Complex{});
     for (auto& stem : overlap) for (auto& c : stem) std::fill(c.begin(), c.end(), 0.f);
-    std::fill(mask.begin(), mask.end(), 0.f); std::fill(filtered.begin(), filtered.end(), Complex{});
+    std::fill(mask.begin(), mask.end(), 0.f); std::fill(previousMask.begin(), previousMask.end(), 1.f); std::fill(filtered.begin(), filtered.end(), Complex{});
     std::fill(backing.begin(), backing.end(), Covariance{}); std::fill(vocal.begin(), vocal.end(), Covariance{});
     readAt = writeAt = queued = 0; pending = 0; frame = -2; received = 0;
     for (unsigned i = 0; i < delay; ++i) push({}, {});
@@ -88,12 +88,16 @@ void MaskSeparator::finish(int64_t index, unsigned column) {
     float previous = mask[0];
     for (unsigned k = 0; k < bins; ++k) {
         float next = k + 1 < bins ? mask[k + 1] : mask[k];
-        float smoothed = .25f * previous + .5f * mask[k] + .25f * next;
-        previous = mask[k]; mask[k] = smoothed;
+        float smoothed = binSmooth ? .25f * previous + .5f * mask[k] + .25f * next : mask[k];
+        previous = mask[k];
+        mask[k] = timeSmooth * previousMask[k] + (1 - timeSmooth) * smoothed;
+        previousMask[k] = mask[k];
     }
+    if (!wiener) {
+        for (unsigned k = 0; k < bins; ++k) { filtered[k] = spectrum[0][k] * mask[k]; filtered[bins + k] = spectrum[1][k] * mask[k]; }
+    } else
     // Causal multichannel Wiener filter: the mask weights each frame into per-bin spatial covariances,
     // then W = R_a (R_a + R_v)^-1 separates by stereo position where the mask alone is ambiguous.
-    constexpr float forget = .7f;
     for (unsigned k = 0; k < bins; ++k) {
         Complex l = spectrum[0][k], r = spectrum[1][k];
         float ll = std::norm(l), rr = std::norm(r); Complex lr = l * std::conj(r);

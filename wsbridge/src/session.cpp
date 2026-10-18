@@ -39,7 +39,7 @@ void Session::stopCapture() {
 }
 void Session::disarm() {
     stopCapture();
-    capture.reset(); source = 0;
+    capture.reset(); source = 0; sourcePid = 0;
     sourceName.clear(); sourceBundle.clear();
 }
 int Session::arm(uint32_t id) {
@@ -48,7 +48,7 @@ int Session::arm(uint32_t id) {
     auto it = std::find_if(available.begin(), available.end(), [id](auto& s) { return s.id == id; });
     if (it == available.end()) throw std::runtime_error("This audio app has closed. Refresh the source list.");
     double sr = tap.start(id, false);
-    source = id; sourceName = it->name; sourceBundle = it->bundle;
+    source = id; sourcePid = it->pid; sourceName = it->name; sourceBundle = it->bundle;
     capture = std::make_unique<CaptureStore>(unsigned(sr));
     captureStop.store(false);
     captureThread = std::thread([this] {
@@ -138,8 +138,9 @@ void Session::status(WSStatus* s) {
     s->sing_model_ready = singModelReady;
     s->buffered = capture ? capture->buffered() : 0;
     s->capturing = capture && !captureStop.load();
-    s->capture_source = source;
-    text(s->capture_name, sourceName);
+    s->capture_source = source; s->capture_pid = sourcePid;
+    text(s->capture_name, sourceName); text(s->capture_bundle, sourceBundle);
+    s->sing_epoch = sing ? sing->resets() : 0;
     s->busy = busy.load(); s->progress = progress.load();
     s->capture_drops = tap.dropped.load();
     s->position = engine.playhead.load(); s->playing = !sing && engine.playing.load(); s->loops = engine.loops.load();
@@ -147,7 +148,8 @@ void Session::status(WSStatus* s) {
     s->speed = engine.speed.load(); s->pitch = engine.pitch.load();
     s->sing = bool(sing); s->quality = sing ? sing->quality.load() : 0;
     s->device_latency = sing ? tap.latency() + output.latency() : 0;
-    s->sing_latency = sing ? sing->delay() + s->device_latency : 0; s->vocal_removal = sing ? sing->removal.load() : 1;
+    s->sing_latency = sing ? sing->nominalDelay() + s->device_latency : 0; s->vocal_removal = sing ? sing->removal.load() : 1;
+    s->sing_queue = sing ? sing->delay() : 0;
     if (sing) {
         s->sing_state = sing->state(); s->sing_buffered = sing->buffered();
         s->sing_position = sing->position(); s->sing_pitch = sing->pitch.load();
@@ -278,17 +280,18 @@ void Session::setSing(bool enabled) {
     if (!source || captureStop.load()) throw std::runtime_error("Click Start Capture before starting Sing.");
     if (!singModelReady) throw std::runtime_error("Choose a Sing model first. Run scripts/sing-clean-model.sh or scripts/sing-model.sh.");
     auto sampleRate = capture->sample_rate();
-    auto nextSing = std::make_unique<Sing>(sampleRate, singPath);
+    auto nextSing = std::make_unique<Sing>(sampleRate, singPath, singLookaheadFrames);
+    nextSing->steady.store(singSteadyWanted);
     ++generation; busy.store(false);
     jobs.submit([this] { separator.unload(); loadedModel.clear(); }, true);
-    auto id = source; auto name = sourceName; auto bundle = sourceBundle;
+    auto id = source; auto pid = sourcePid; auto name = sourceName; auto bundle = sourceBundle;
     disarm(); output.stop(); outputStarted = false;
     try {
         double sr = tap.start(id, true, [](void* context, Frame frame) noexcept { static_cast<Sing*>(context)->feed(frame); }, nextSing.get());
         if (unsigned(sr) != sampleRate) throw std::runtime_error("The source audio format changed. Start Capture again before starting Sing.");
         capture = std::make_unique<CaptureStore>(unsigned(sr));
         sing = std::move(nextSing);
-        source = id; sourceName = name; sourceBundle = bundle;
+        source = id; sourcePid = pid; sourceName = name; sourceBundle = bundle;
         startOutput(); captureStop.store(false); engine.playing.store(false);
         captureThread = std::thread([this] {
             std::array<Frame, 2048> frames;
@@ -302,7 +305,12 @@ void Session::setSing(bool enabled) {
     } catch (...) { disarm(); throw; }
 }
 void Session::vocals(float amount) { if (sing) sing->removal.store(sane(amount, 0, 1)); }
+void Session::transport(int command) {
+    if (sourceBundle.empty()) throw std::runtime_error("Choose a source first.");
+    transportSourceApp(sourceBundle, command < 0 || command > 2 ? 1 : command);
+}
 void Session::singPitch(float value) { if (sing) sing->pitch.store(sane(value, -6, 6)); }
+void Session::singSteady(bool value) { singSteadyWanted = value; if (sing) sing->steady.store(value); }
 void Session::singModel(const char* path) {
     singPath = path ? path : "";
     std::error_code error;

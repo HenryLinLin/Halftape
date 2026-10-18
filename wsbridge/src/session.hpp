@@ -29,10 +29,12 @@ class Session {
     std::unique_ptr<Sing> sing;
     Jobs jobs;
     uint32_t source = 0;
+    int sourcePid = 0;
     std::string sourceName, sourceBundle, sixPath, fourPath, singPath;
     bool singModelReady = false;
     uint64_t nextID = 1;
-    bool pauseSource = false, counting = false, outputStarted = false;
+    bool pauseSource = false, counting = false, outputStarted = false, singSteadyWanted = false;
+    unsigned singLookaheadFrames = 2;
     double gridOffset = 0;
     std::array<float, 6> gain{1,1,1,1,1,1};
     std::array<bool, 6> muted{}, soloed{};
@@ -71,6 +73,9 @@ public:
     void setSing(bool);
     void vocals(float);
     void singPitch(float);
+    void singSteady(bool);
+    void singLookahead(int frames) { singLookaheadFrames = unsigned(std::clamp(frames, 0, 64)); }
     void setPause(bool value) { pauseSource = value; }
+    void transport(int command);
 };
 }
