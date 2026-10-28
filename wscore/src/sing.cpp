@@ -68,7 +68,7 @@ void Sing::run() {
         uint64_t expected = 0, origin = 0, resampled = 0, generation = 0, flushedAt = 0;
         unsigned overruns = 0, windowHops = 0, slowWindows = 0;
         double worst = 0, previousWorst = 0, windowSeconds = 0, ceiling = targetFrames.load();
-        unsigned windows = 0, locked = 0;
+        unsigned windows = 0, locked = 0, lockedBoost = 0;
         uint64_t backlog = 0, previousBacklog = 0;
         bool flushed = false, relaxPending = false;
         auto lastOverrun = std::chrono::steady_clock::time_point{};
@@ -103,7 +103,7 @@ void Sing::run() {
                 windowHops = 0; previousWorst = worst; worst = 0; windowSeconds = 0;
                 previousBacklog = backlog; backlog = 0;
                 // Shrink for the first four seconds, then lock so the delay stops moving mid-song.
-                if (++windows < 4 && !steady.load() && !locked) ceiling *= .75; else if (!locked) locked = targetFrames.load();
+                if (++windows < 4 && !steady.load() && !locked) ceiling *= .75; else if (!locked) { locked = targetFrames.load(); lockedBoost = boost.load(); }
                 // Ask for at most half of each period so a slow run never trips the scheduler's overrun failsafe.
                 double period = hopSeconds * std::ceil(std::max(1., 4 * previousWorst / hopSeconds));
                 realtimePolicy(period, std::min(2 * previousWorst, .5 * period));
@@ -113,10 +113,9 @@ void Sing::run() {
             double slowest = std::max(worst, previousWorst);
             double lateness = double(std::max(backlog, previousBacklog)) * rate / sourceRate;
             double cushion = slowest * rate * 1.5 + lateness + 512 + liveHop + boost.load();
-            if (steady.load() && !locked) locked = targetFrames.load();
-            auto target = unsigned(std::max({cushion, ceiling, double(locked)}));
+            if (steady.load() && !locked) { locked = targetFrames.load(); lockedBoost = boost.load(); }
+            auto target = locked ? locked + boost.load() - lockedBoost : unsigned(std::max(cushion, ceiling));
             target = std::clamp(target, std::min(minimumTarget.load(), 8192u), 8192u);
-            if (locked) locked = std::max(locked, target);
             targetFrames.store(target);
             if (!valid) return;
             auto first = resampled - separator->latency();
